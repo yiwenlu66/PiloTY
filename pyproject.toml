@@ -1,0 +1,78 @@
+[project]
+name = "pty-mcp"
+dynamic = ["version"] # Use dynamic version from package
+description = "An MCP tool server that provides a stateful terminal."
+authors = [{ name = "David Wurtz", email = "david.w@qodo.ai" }]
+dependencies = [
+  "mcp>=1.2.1",
+  "pexpect>=4.9.0",
+]
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "Apache 2.0" }
+
+[project.scripts]
+pty-mcp = "pty_mcp.pty_mcp:main"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-mock", "pytest-cov", "black", "isort", "mypy", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "pty_mcp/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pty_mcp"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+include = '\.pyi?$'
+extend-exclude = '''
+# A regex preceded with ^/ will apply only to files and directories
+# in the root of the project.
+^/tests/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = [
+  "E",  # pycodestyle errors
+  "W",  # pycodestyle warnings
+  "F",  # pyflakes
+  "I",  # isort
+  "B",  # flake8-bugbear
+  "C4", # flake8-comprehensions
+  "UP", # pyupgrade
+]
+extend-ignore = [
+  "E501", # Line too long (handled by black)
+]
+
+[tool.ruff.isort]
+known-first-party = ["pty_mcp"]
+combine-as-imports = true
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+plugins = ["pydantic.mypy"]
+exclude = [
+  "tests/", # Exclude test files
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --cov=pty_mcp --cov-report=xml --cov-report=term-missing"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]

@@ -1,0 +1,26 @@
+# virtual environment
+.venv/
+venv/
+
+# python
+__pycache__/
+*.pyc
+
+# build
+build/
+dist/
+*.egg-info/
+
+# coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# ruff
+.ruff_cache/
+
+# generated
+qodo-cover-mcp.md
