@@ -16,7 +16,7 @@ class ShellSession:
             ["--norc", "--noprofile"],
             encoding="utf-8",
             echo=False,
-            env={"TERM": "dumb", "PATH": os.environ["PATH"]},
+            env={**os.environ, "TERM": "dumb"},
         )
         # Initialize the shell prompt to our custom prompt
         try:
