@@ -1,5 +1,6 @@
 import os
-
+import signal
+import sys
 import pexpect
 from mcp.server.fastmcp import FastMCP
 
@@ -28,6 +29,11 @@ class ShellSession:
         # Set the shell prompt to the custom marker
         self.process.sendline(f"PS1='{self.prompt}'")
         self.process.expect(self.prompt)  # wait until the new prompt is ready
+
+    def terminate(self):
+        """Terminate the shell process."""
+        if self.process.isalive():
+            self.process.terminate(force=True)  # Send SIGKILL
 
     def run(self, command: str) -> str:
         """Execute a command in this shell session and return its output or error."""
@@ -61,6 +67,12 @@ class SessionManager:
         if session_id not in self.sessions:
             self.sessions[session_id] = ShellSession()
         return self.sessions[session_id]
+
+    def terminate_all_sessions(self):
+        """Terminate all active shell sessions."""
+        for session_id, session in self.sessions.items():
+            session.terminate()
+        self.sessions.clear()
 
 
 # Initialize the MCP server (no authentication required)
@@ -96,7 +108,17 @@ def run(session_id: str, command: str) -> str:
     return session.run(command)
 
 
+def signal_handler(sig, frame):
+    """Handle signals like SIGINT and SIGTERM."""
+    session_manager.terminate_all_sessions()
+    sys.exit(0)
+
+
 def main():
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)  # Handle Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Handle kill/system shutdown
+
     # Start the MCP server (synchronous startup)
     mcp.run()
 
