@@ -21,12 +21,14 @@ class ShellSession:
         # Define a unique prompt to detect when a command finishes
         self.prompt = "MCP> "
         # Spawn an interactive Bash shell with minimal configuration
+        # Add GIT_PAGER=cat and PAGER=cat to disable paging for git and other tools
+        session_env = {**os.environ, "TERM": "dumb", "GIT_PAGER": "cat", "PAGER": "cat"}
         self.process = pexpect.spawn(
             "bash",
             ["--norc", "--noprofile"],
             encoding="utf-8",
             echo=False,
-            env={**os.environ, "TERM": "dumb"},
+            env=session_env,
         )
         # Initialize the shell prompt to our custom prompt
         try:
