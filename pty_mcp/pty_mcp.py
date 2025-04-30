@@ -2,7 +2,16 @@ import os
 import signal
 import sys
 import pexpect
+import logging
 from mcp.server.fastmcp import FastMCP
+
+# Configure file logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler = logging.FileHandler('pty_mcp.log')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
 
 class ShellSession:
@@ -37,6 +46,7 @@ class ShellSession:
 
     def run(self, command: str) -> str:
         """Execute a command in this shell session and return its output or error."""
+        logging.info(f"Running command: {command}")  # Log command start
         try:
             # Send the command to the shell
             self.process.sendline(command)
@@ -49,8 +59,13 @@ class ShellSession:
             # Strip trailing newline (and carriage return if any)
             return output.rstrip("\r\n")
         except pexpect.TIMEOUT:
+            # Log detailed information on timeout
+            logging.error(f"Command timed out: {command}")
+            logging.error(f"pexpect 'before' buffer: {repr(self.process.before)}")
+            logging.error(f"pexpect 'buffer' content: {repr(self.process.buffer)}")
             return "Error: Command timed out"
         except pexpect.EOF:
+            logging.error("Session terminated unexpectedly")
             return "Error: Session terminated unexpectedly"
         except Exception as e:
             return f"Error: {str(e)}"
