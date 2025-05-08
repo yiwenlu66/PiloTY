@@ -8,8 +8,8 @@ from mcp.server.fastmcp import FastMCP
 # Configure file logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-file_handler = logging.FileHandler('/tmp/pty_mcp.log')
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+file_handler = logging.FileHandler("/tmp/pty_mcp.log")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
@@ -18,11 +18,16 @@ class ShellSession:
     """Manages an interactive Bash shell session using pexpect."""
 
     def __init__(self):
-        # Define a unique prompt to detect when a command finishes
         self.prompt = "MCP> "
-        # Spawn an interactive Bash shell with minimal configuration
-        # Add GIT_PAGER=cat and PAGER=cat to disable paging for git and other tools
-        session_env = {**os.environ, "TERM": "dumb", "GIT_PAGER": "cat", "PAGER": "cat"}
+        self.cont_prompt = "MCP_CONT> "  # unique PS2
+        session_env = {
+            **os.environ,
+            "TERM": "dumb",  # disable color
+            "GIT_PAGER": "cat",  # disable paging for git commands
+            "PAGER": "cat",  # disable paging for other tools
+        }
+
+        # Start a bare-bones bash
         self.process = pexpect.spawn(
             "bash",
             ["--norc", "--noprofile"],
@@ -30,47 +35,50 @@ class ShellSession:
             echo=False,
             env=session_env,
         )
-        # Initialize the shell prompt to our custom prompt
+
+        # Wait for the initial system prompt and then set ours
         try:
-            # Wait for the default bash prompt (user or root) to appear
             self.process.expect([r"\$ ", r"# "], timeout=5)
         except pexpect.TIMEOUT:
-            # If no prompt seen (should not usually happen), continue anyway
             pass
-        # Set the shell prompt to the custom marker
+
+        # Custom PS1/PS2 so we always know where we are
         self.process.sendline(f"PS1='{self.prompt}'")
-        self.process.expect(self.prompt)  # wait until the new prompt is ready
+        self.process.sendline(f"PS2='{self.cont_prompt}'")
+        self.process.expect(self.prompt, timeout=5)
 
     def terminate(self):
-        """Terminate the shell process."""
         if self.process.isalive():
-            self.process.terminate(force=True)  # Send SIGKILL
+            self.process.terminate(force=True)
 
-    def run(self, command: str) -> str:
-        """Execute a command in this shell session and return its output or error."""
-        logging.info(f"Running command: {command}")  # Log command start
+    def run(self, command: str, timeout: int = 30) -> str:
+        """
+        Execute *command* and return stdout/stderr.
+        Cancels the command if Bash drops to the continuation prompt.
+        """
+        logging.info(f"Running command: {command}")
         try:
-            # Send the command to the shell
             self.process.sendline(command)
-            # Wait for the prompt to appear again, indicating the command is done
-            self.process.expect(self.prompt, timeout=30)
-            # Everything before the prompt is the command output
-            output = self.process.before  # captured output (excluding the prompt)
-            if output is None:
-                return ""  # No output
-            # Strip trailing newline (and carriage return if any)
+            idx = self.process.expect([self.prompt, self.cont_prompt], timeout=timeout)
+
+            # idx == 1 -> we matched PS2 -> syntax error / unbalanced quotes
+            if idx == 1:
+                self.process.sendcontrol("c")  # abort current line
+                self.process.expect(self.prompt, timeout=5)
+                return "Error: command appears incomplete (unbalanced quotes or parentheses)"
+
+            output = self.process.before or ""
             return output.rstrip("\r\n")
+
         except pexpect.TIMEOUT:
-            # Log detailed information on timeout
             logging.error(f"Command timed out: {command}")
-            logging.error(f"pexpect 'before' buffer: {repr(self.process.before)}")
-            logging.error(f"pexpect 'buffer' content: {repr(self.process.buffer)}")
+            logging.error(f"pexpect 'before': {repr(self.process.before)}")
             return "Error: Command timed out"
         except pexpect.EOF:
             logging.error("Session terminated unexpectedly")
             return "Error: Session terminated unexpectedly"
         except Exception as e:
-            return f"Error: {str(e)}"
+            return f"Error: {e}"
 
 
 class SessionManager:
