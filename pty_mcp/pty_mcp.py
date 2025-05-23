@@ -126,6 +126,8 @@ def run(session_id: str, command: str) -> str:
         ''
         >>> run("session1", "pwd")
         '/tmp'
+
+    Tip: if you're getting repeated "Error: Command timed out" errors, try using a different session_id.
     """
     # Get or create the shell session for the given session_id
     session = session_manager.get_session(session_id)
