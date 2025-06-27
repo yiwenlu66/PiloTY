@@ -3,6 +3,7 @@ import signal
 import sys
 import pexpect
 import logging
+import re
 from mcp.server.fastmcp import FastMCP
 
 # Configure file logging
@@ -51,6 +52,28 @@ class ShellSession:
     def terminate(self):
         if self.process.isalive():
             self.process.terminate(force=True)
+    
+    def get_output_since(self, timeout: float = 0.1) -> str:
+        """
+        Get any output that appeared since last command without sending a new command.
+        
+        Note: In practice, background process output is automatically captured by the
+        next run() command, so this method may not capture background output as expected.
+        Background output and job completion notices appear mixed with the next command's output.
+        """
+        try:
+            output = ""
+            while True:
+                chunk = self.process.read_nonblocking(size=1024, timeout=timeout)
+                if chunk:
+                    output += chunk
+                else:
+                    break
+            return output.rstrip("\r\n")
+        except pexpect.TIMEOUT:
+            return ""
+        except pexpect.EOF:
+            return ""
 
     def run(self, command: str, timeout: int = 30) -> str:
         """
@@ -80,6 +103,44 @@ class ShellSession:
             return "Error: Session terminated unexpectedly"
         except Exception as e:
             return f"Error: {e}"
+    
+    def run_background(self, command: str) -> dict:
+        """Run a command in background and return job info."""
+        if not command.rstrip().endswith('&'):
+            command = command + ' &'
+        
+        result = self.run(command)
+        
+        # Parse job info from output like "[1] 12345"
+        match = re.match(r'\[(\d+)\]\s+(\d+)', result)
+        if match:
+            return {
+                'job_id': int(match.group(1)),
+                'pid': int(match.group(2)),
+                'output': result
+            }
+        return {'output': result}
+    
+    def check_jobs(self) -> list[dict]:
+        """Get status of all background jobs."""
+        output = self.run("jobs -l")
+        jobs = []
+        
+        # Parse jobs output
+        # Format: [1]+ 12345 Running   sleep 10 &
+        for line in output.split('\n'):
+            if line.strip():
+                match = re.match(r'\[(\d+)\]([+-]?)\s+(\d+)\s+(\w+)\s+(.+)', line)
+                if match:
+                    jobs.append({
+                        'job_id': int(match.group(1)),
+                        'current': match.group(2) == '+',
+                        'previous': match.group(2) == '-',
+                        'pid': int(match.group(3)),
+                        'status': match.group(4),
+                        'command': match.group(5)
+                    })
+        return jobs
 
 
 class SessionManager:
@@ -134,6 +195,35 @@ def run(session_id: str, command: str) -> str:
     session = session_manager.get_session(session_id)
     # Run the command in the session and return the result
     return session.run(command)
+
+
+@mcp.tool()
+def monitor_output(session_id: str, duration: float = 1.0) -> str:
+    """
+    Monitor PTY output for a specified duration without running any commands.
+    
+    Note: Background process output typically appears mixed with the next run() command.
+    This tool may not capture background output as expected. To get background process
+    output, simply run another command (even an empty echo) and the background output
+    will be included.
+    
+    Args:
+        session_id: The ID of the shell session to monitor.
+        duration: How long to monitor for output (in seconds, max 10).
+    
+    Returns:
+        Any output that appeared during the monitoring period.
+    
+    Example:
+        >>> run("session1", "echo 'Background task' &")
+        '[1] 12345'
+        >>> run("session1", "echo 'Next'")  # Background output appears here
+        'Background task\nNext\n[1]+  Done  echo "Background task"'
+    """
+    # Limit duration to reasonable values
+    duration = min(duration, 10.0)
+    session = session_manager.get_session(session_id)
+    return session.get_output_since(timeout=duration)
 
 
 def signal_handler(sig, frame):
