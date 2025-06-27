@@ -18,8 +18,8 @@ class ShellSession:
     """Manages an interactive Bash shell session using pexpect."""
 
     def __init__(self):
-        self.prompt = "MCP> "
-        self.cont_prompt = "MCP_CONT> "  # unique PS2
+        self.ps1 = "MCP> "
+        self.ps2 = "MCP_CONT> "  # unique PS2
         session_env = {
             **os.environ,
             "TERM": "dumb",  # disable color
@@ -43,9 +43,10 @@ class ShellSession:
             pass
 
         # Custom PS1/PS2 so we always know where we are
-        self.process.sendline(f"PS1='{self.prompt}'")
-        self.process.sendline(f"PS2='{self.cont_prompt}'")
-        self.process.expect(self.prompt, timeout=5)
+        self.process.sendline(f"PS1='{self.ps1}'")
+        self.process.expect(self.ps1, timeout=5)
+        self.process.sendline(f"PS2='{self.ps2}'")
+        self.process.expect(self.ps1, timeout=5)
 
     def terminate(self):
         if self.process.isalive():
@@ -59,12 +60,12 @@ class ShellSession:
         logging.info(f"Running command: {command}")
         try:
             self.process.sendline(command)
-            idx = self.process.expect([self.prompt, self.cont_prompt], timeout=timeout)
+            idx = self.process.expect([self.ps1, self.ps2], timeout=timeout)
 
             # idx == 1 -> we matched PS2 -> syntax error / unbalanced quotes
             if idx == 1:
                 self.process.sendcontrol("c")  # abort current line
-                self.process.expect(self.prompt, timeout=5)
+                self.process.expect(self.ps1, timeout=5)
                 return "Error: command appears incomplete (unbalanced quotes or parentheses)"
 
             output = self.process.before or ""
