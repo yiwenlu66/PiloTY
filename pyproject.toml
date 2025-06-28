@@ -12,7 +12,7 @@ readme = "README.md"
 license = { text = "Apache 2.0" }
 
 [project.scripts]
-piloty = "piloty.piloty:main"
+piloty = "piloty.mcp_server:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-mock", "pytest-cov", "black", "isort", "mypy", "ruff"]

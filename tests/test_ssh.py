@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from piloty.piloty import ShellSession
+from piloty.core import ShellSession
 
 def test_ssh_detection():
     """Test SSH command detection logic."""
