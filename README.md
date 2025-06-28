@@ -2,6 +2,8 @@
 
 **AI Pilot for PTY Operations** - An MCP server that enables AI agents to control interactive terminals like a human.
 
+> **⚠️ Work in Progress**: This project is under active development and not ready for production use yet.
+
 PiloTY (Pilot + PTY) bridges AI agents and terminal interfaces through the Model Context Protocol, providing stateful terminal sessions with support for interactive applications, SSH connections, and background processes.
 
 ## Acknowledgments
