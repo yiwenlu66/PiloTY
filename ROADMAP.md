@@ -255,7 +255,61 @@ class REPLManager:
         return None
 ```
 
-### 2.2 Line-Based Interaction
+### 2.2 Password Input Support
+
+Support for programs that require password input:
+
+```python
+class PasswordHandler:
+    """Handle password prompts in various contexts."""
+    
+    PASSWORD_PATTERNS = [
+        r'[Pp]assword:',
+        r'[Pp]assword for',
+        r'Enter password:',
+        r'sudo.*password',
+        r'\[sudo\] password',
+        r'Enter passphrase',
+        r'Enter PIN:',
+    ]
+    
+    def detect_password_prompt(self, output: str) -> bool:
+        """Detect if output contains a password prompt."""
+        for pattern in self.PASSWORD_PATTERNS:
+            if re.search(pattern, output):
+                return True
+        return False
+    
+    def handle_password_input(self, password: str):
+        """Send password securely without echo."""
+        # Send password without line ending first
+        self.process.send(password)
+        # Then send newline to submit
+        self.process.send('\n')
+        
+    def test_password_contexts(self):
+        """Test password input in different scenarios."""
+        # Test local sudo
+        result = self.execute_with_password("sudo ls /root", "admin_password")
+        assert result['exit_code'] == 0
+        
+        # Test SSH password login
+        result = self.execute_with_password(
+            "ssh user@host", 
+            "ssh_password",
+            expect_prompt_after=True
+        )
+        assert "user@host" in result['prompt']
+        
+        # Test command requiring password in SSH session
+        # First establish SSH session
+        self.execute_command("ssh user@host")
+        # Then run sudo command on remote
+        result = self.execute_with_password("sudo apt update", "remote_password")
+        assert "packages can be upgraded" in result['output']
+```
+
+### 2.3 Line-Based Interaction
 
 ```python
 class LineBasedInteraction:
@@ -308,7 +362,7 @@ class LineBasedInteraction:
         return {"exited": True}
 ```
 
-### 2.3 Smart Line Buffering
+### 2.4 Smart Line Buffering
 
 ```python
 class SmartLineBuffer:
