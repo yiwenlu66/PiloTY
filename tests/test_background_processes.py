@@ -14,8 +14,8 @@ def test_background_processes():
         
         # Test 1: Basic background job
         print("1. Basic background job")
-        job = session.run_background("sleep 2")
-        print(f"   Started: {job}")
+        result = session.run("sleep 2 &")
+        print(f"   Started: {result}")
         
         jobs = session.check_jobs()
         assert len(jobs) == 1
@@ -24,8 +24,8 @@ def test_background_processes():
         
         # Test 2: Background with output
         print("\n2. Background job with output")
-        job = session.run_background("echo 'Background output'")
-        print(f"   Started: {job}")
+        result = session.run("echo 'Background output' &")
+        print(f"   Started: {result}")
         
         # Background output appears with next command
         result = session.run("echo 'Next command'")
@@ -35,8 +35,8 @@ def test_background_processes():
         
         # Test 3: Multiple jobs
         print("\n3. Multiple background jobs")
-        job1 = session.run_background("sleep 1")
-        job2 = session.run_background("sleep 1")
+        result1 = session.run("sleep 1 &")
+        result2 = session.run("sleep 1 &")
         
         jobs = session.check_jobs()
         running_jobs = [j for j in jobs if j['status'] == 'Running']

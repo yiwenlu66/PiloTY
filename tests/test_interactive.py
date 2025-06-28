@@ -12,7 +12,6 @@ def show_help():
     print("  /help                    - Show this help message")
     print("  /exit, /quit             - Exit the test environment")
     print("  /poll_output [timeout] [flush] - Poll for output (timeout: 0.1s, flush: true)")
-    print("  /run_background <command> - Run a command in background")
     print("  /check_jobs              - Check status of background jobs")
     print("  /session_info            - Get current session information")
     print("\nRegular commands (not starting with /) are sent to the PTY.")
@@ -50,15 +49,6 @@ def handle_slash_command(session, command):
                 print(result)
             else:
                 print("(no output)")
-            return True
-            
-        elif cmd == '/run_background':
-            if not args:
-                print("Error: /run_background requires a command")
-                return True
-            result = session.run_background(args)
-            print(f"\nAPI Result (run_background):")
-            print(format_result(result))
             return True
             
         elif cmd == '/check_jobs':

@@ -360,22 +360,6 @@ class ShellSession:
         except Exception as e:
             return f"Error: {e}"
     
-    def run_background(self, command: str) -> dict:
-        """Run a command in background and return job info."""
-        if not command.rstrip().endswith('&'):
-            command = command + ' &'
-        
-        result = self.run(command)
-        
-        # Parse job info from output like "[1] 12345"
-        match = re.match(r'\[(\d+)\]\s+(\d+)', result)
-        if match:
-            return {
-                'job_id': int(match.group(1)),
-                'pid': int(match.group(2)),
-                'output': result
-            }
-        return {'output': result}
     
     def check_jobs(self) -> list[dict]:
         """Get status of all background jobs."""
@@ -386,15 +370,13 @@ class ShellSession:
         # Format: [1]+ 12345 Running   sleep 10 &
         for line in output.split('\n'):
             if line.strip():
-                match = re.match(r'\[(\d+)\]([+-]?)\s+(\d+)\s+(\w+)\s+(.+)', line)
+                match = re.match(r'\[(\d+)\][+-]?\s+(\d+)\s+(\w+)\s+(.+)', line)
                 if match:
                     jobs.append({
                         'job_id': int(match.group(1)),
-                        'current': match.group(2) == '+',
-                        'previous': match.group(2) == '-',
-                        'pid': int(match.group(3)),
-                        'status': match.group(4),
-                        'command': match.group(5)
+                        'pid': int(match.group(2)),
+                        'status': match.group(3),
+                        'command': match.group(4)
                     })
         return jobs
     
