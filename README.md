@@ -8,9 +8,33 @@ PiloTY (Pilot + PTY) bridges AI agents and terminal interfaces through the Model
 
 📖 **[Read the technical design document](TECHNICAL.md)** for detailed architecture and use cases.
 
-## Acknowledgments
+## What You Can Do
 
-PiloTY is built upon the foundational work of [pty-mcp](https://github.com/qodo-ai/pty-mcp) by [Qodo](https://github.com/qodo-ai). We extend our gratitude to the original authors for creating the initial MCP terminal server implementation that made this project possible.
+**Transform natural language into powerful terminal workflows.** With PiloTY, AI agents can control terminals just like experienced developers - maintaining state, managing SSH sessions, and handling complex multi-step operations through simple conversation.
+
+### Stateful Development Workflows
+
+> "Change to my project directory, activate the virtual environment, and run the tests"
+
+> "Install the dependencies, build the project, and run the linter"
+
+### Remote Server Management  
+
+> "SSH into my production server, check the logs in /var/log/, and restart the nginx service"
+
+> "Connect to my database server and show me the current connections"
+
+### Background Process Monitoring
+
+> "Start a long-running data processing script in the background and check on its progress every few minutes"
+
+> "Download a large file using wget in the background and let me know when it's done"
+
+### Interactive Debugging
+
+> "Run my Python script with ipdb and set a breakpoint at line 42"
+
+> "Start a tmux session on my remote server and attach to an existing session"
 
 ## Installation
 
@@ -63,7 +87,9 @@ After installation, verify the `piloty` command is available:
 which piloty  # Should show the installed location
 ```
 
-## Usage with Claude Code
+## Setup with AI Agents
+
+### Claude Code
 
 Add PiloTY to your Claude Code configuration in `~/.claude.json`:
 
@@ -79,7 +105,7 @@ Add PiloTY to your Claude Code configuration in `~/.claude.json`:
 
 **Important**: Restart Claude Code completely after adding the configuration.
 
-## Usage with Claude Desktop
+### Claude Desktop
 
 Add the following to your Claude Desktop configuration:
 
@@ -101,6 +127,20 @@ Add the following to your Claude Desktop configuration:
 - **Handler Architecture**: Extensible system for adding new interactive programs
 - **PTY Control**: True terminal emulation for authentic interactions
 
+## Roadmap
+
+### ✅ Currently Supported
+- **Stateful shell sessions** - Commands maintain context and working directory
+- **SSH with public key authentication** - Seamless remote server access
+- **Background process management** - Start, monitor, and control long-running tasks
+- **Interactive program handling** - Basic support for SSH and shell interactions
+
+### 🚧 Coming Soon
+- **Password authentication** - Support for SSH and other tools requiring password input
+- **REPL support** - Interactive data analysis with Python, R, and other interpreters
+- **Advanced interactive tools** - Enhanced vim, tmux, and debugger integration
+- **Multi-session management** - Coordinate multiple terminal sessions simultaneously
+
 ## Session Logging
 
 PiloTY automatically logs all terminal sessions to `~/.piloty/` for debugging and inspection:
@@ -111,12 +151,6 @@ PiloTY automatically logs all terminal sessions to `~/.piloty/` for debugging an
 - **Session state**: Working directory, background jobs, active handlers
 
 Use the [session viewer tool](tools/README.md) to inspect session logs, or browse the files directly with standard UNIX tools like `tail`, `grep`, and `cat`.
-
-## Developer Resources
-
-- **[Development Guide](DEVELOPMENT.md)**: Architecture details and how to extend PiloTY
-- **[Developer Tools](tools/README.md)**: Interactive PTY playground for testing
-- **[Technical Design](TECHNICAL.md)**: Detailed architecture and philosophy
 
 ## Testing Integration
 
@@ -134,31 +168,11 @@ After configuration, test PiloTY in Claude Code by asking it to perform terminal
 
 The AI will automatically use PiloTY's MCP tools to execute these requests while maintaining session state across commands.
 
-## Use Cases
+## Developer Resources
 
-### Stateful Development Workflows
-
-> "Change to my project directory, activate the virtual environment, and run the tests"
-
-> "Install the dependencies, build the project, and run the linter"
-
-### Remote Server Management  
-
-> "SSH into my production server, check the logs in /var/log/, and restart the nginx service"
-
-> "Connect to my database server and show me the current connections"
-
-### Background Process Monitoring
-
-> "Start a long-running data processing script in the background and check on its progress every few minutes"
-
-> "Download a large file using wget in the background and let me know when it's done"
-
-### Interactive Debugging
-
-> "Run my Python script with ipdb and set a breakpoint at line 42"
-
-> "Start a tmux session on my remote server and attach to an existing session"
+- **[Development Guide](DEVELOPMENT.md)**: Architecture details and how to extend PiloTY
+- **[Developer Tools](tools/README.md)**: Interactive PTY playground for testing
+- **[Technical Design](TECHNICAL.md)**: Detailed architecture and philosophy
 
 ## Testing and Development
 
@@ -183,6 +197,10 @@ python tests/test_background_processes.py
 python tests/test_poll_output.py
 python tests/test_ssh.py
 ```
+
+## Acknowledgments
+
+PiloTY is built upon the foundational work of [pty-mcp](https://github.com/qodo-ai/pty-mcp) by [Qodo](https://github.com/qodo-ai). We extend our gratitude to the original authors for creating the initial MCP terminal server implementation that made this project possible.
 
 ## License
 
