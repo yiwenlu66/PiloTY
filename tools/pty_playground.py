@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+PTY Playground - Interactive development tool for PiloTY.
+
+This tool provides an interactive environment to test and explore PiloTY's
+functionality without going through the MCP interface. It's useful for:
+- Testing handler behavior
+- Debugging PTY interactions
+- Exploring edge cases
+- Manual testing during development
+"""
 import sys
 import json
 from pathlib import Path
@@ -79,9 +89,11 @@ def main():
     # Create a shell session
     session = ShellSession()
     
-    print("PTY Test Environment")
+    print("🎮 PTY Playground - Interactive Terminal Control")
+    print("=" * 50)
+    print("This tool lets you interact with PiloTY directly.")
     print("Type /help for available commands or /exit to quit")
-    print("-" * 40)
+    print("-" * 50)
     
     try:
         while True:
