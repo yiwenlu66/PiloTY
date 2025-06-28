@@ -1,7 +1,7 @@
 [project]
-name = "pty-mcp"
+name = "piloty"
 dynamic = ["version"] # Use dynamic version from package
-description = "An MCP tool server that provides a stateful terminal."
+description = "PiloTY: AI pilot for PTY operations via MCP - enables AI agents to control interactive terminals like a human."
 authors = [{ name = "David Wurtz", email = "david.w@qodo.ai" }]
 dependencies = [
   "mcp>=1.2.1",
@@ -12,7 +12,7 @@ readme = "README.md"
 license = { text = "Apache 2.0" }
 
 [project.scripts]
-pty-mcp = "pty_mcp.pty_mcp:main"
+piloty = "piloty.piloty:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-mock", "pytest-cov", "black", "isort", "mypy", "ruff"]
@@ -22,10 +22,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
-path = "pty_mcp/__init__.py"
+path = "piloty/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["pty_mcp"]
+packages = ["piloty"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -57,7 +57,7 @@ extend-ignore = [
 ]
 
 [tool.ruff.isort]
-known-first-party = ["pty_mcp"]
+known-first-party = ["piloty"]
 combine-as-imports = true
 
 [tool.mypy]
@@ -73,6 +73,6 @@ exclude = [
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra -q --cov=pty_mcp --cov-report=xml --cov-report=term-missing"
+addopts = "-ra -q --cov=piloty --cov-report=xml --cov-report=term-missing"
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]

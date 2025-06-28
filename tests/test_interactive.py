@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pty_mcp.pty_mcp import ShellSession
+from piloty.piloty import ShellSession
 
 def show_help():
     """Show available slash commands."""
