@@ -165,6 +165,7 @@ class ShellSession:
             # Update state after handler processing
             if self.logger:
                 self._update_state()
+                self.logger.log_interaction(command, output)
             return output
         
         # Get prompts from handler or use defaults
@@ -186,7 +187,10 @@ class ShellSession:
             if idx == 1:
                 self.process.sendcontrol("c")  # abort current line
                 self.process.expect(prompt_patterns[0], timeout=5)
-                return "Error: command appears incomplete (unbalanced quotes or parentheses)"
+                error_msg = "Error: command appears incomplete (unbalanced quotes or parentheses)"
+                if self.logger:
+                    self.logger.log_interaction(command, error_msg)
+                return error_msg
 
             output = self.process.before or ""
             
@@ -196,18 +200,28 @@ class ShellSession:
             # Update state after successful command
             if self.logger:
                 self._update_state()
+                self.logger.log_interaction(command, output.rstrip("\r\n"))
             
             return output.rstrip("\r\n")
 
         except pexpect.TIMEOUT:
             logging.error(f"Command timed out: {command}")
             logging.error(f"pexpect 'before': {repr(self.process.before)}")
-            return "Error: Command timed out"
+            error_msg = "Error: Command timed out"
+            if self.logger:
+                self.logger.log_interaction(command, error_msg)
+            return error_msg
         except pexpect.EOF:
             logging.error("Session terminated unexpectedly")
-            return "Error: Session terminated unexpectedly"
+            error_msg = "Error: Session terminated unexpectedly"
+            if self.logger:
+                self.logger.log_interaction(command, error_msg)
+            return error_msg
         except Exception as e:
-            return f"Error: {e}"
+            error_msg = f"Error: {e}"
+            if self.logger:
+                self.logger.log_interaction(command, error_msg)
+            return error_msg
     
     def check_jobs(self) -> list[dict]:
         """Get status of all background jobs."""

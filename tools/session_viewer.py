@@ -123,7 +123,7 @@ def show_session_info(session_id):
             
     # Show files
     print("\nLog Files:")
-    for log_file in ['commands.log', 'transcript.log']:
+    for log_file in ['commands.log', 'transcript.log', 'interaction.log']:
         file_path = session_path / log_file
         if file_path.exists():
             size = file_path.stat().st_size
@@ -160,6 +160,41 @@ def show_commands(session_id, last_n=None):
     print("-" * 50)
     for line in lines:
         print(line.rstrip())
+
+
+def show_interactions(session_id, last_n=None):
+    """Show formatted interactions from a session."""
+    piloty_dir = get_piloty_dir()
+    
+    # Find session
+    session_path = piloty_dir / "active" / session_id
+    if session_path.exists() and session_path.is_symlink():
+        session_path = session_path.resolve()
+    else:
+        session_path = piloty_dir / "sessions" / session_id
+        
+    if not session_path.exists():
+        print(f"Session '{session_id}' not found.")
+        return
+        
+    interaction_file = session_path / "interaction.log"
+    if not interaction_file.exists():
+        print("No interaction log found.")
+        return
+        
+    with open(interaction_file) as f:
+        content = f.read()
+        
+    if last_n:
+        # Split by timestamp sections and get last N
+        sections = content.split('\n[')[1:]  # Skip first empty split
+        if sections:
+            sections = sections[-last_n:]
+            content = '\n[' + '\n['.join(sections)
+        
+    print(f"\nInteractions from session {session_id}:")
+    print("-" * 50)
+    print(content)
 
 
 def tail_transcript(session_id, follow=False):
@@ -253,6 +288,11 @@ def main():
     commands_parser.add_argument('session_id', help='Session ID')
     commands_parser.add_argument('-n', '--last', type=int, help='Show only last N commands')
     
+    # Interactions command
+    interactions_parser = subparsers.add_parser('interactions', help='Show formatted command/output interactions')
+    interactions_parser.add_argument('session_id', help='Session ID')
+    interactions_parser.add_argument('-n', '--last', type=int, help='Show only last N interactions')
+    
     # Tail command
     tail_parser = subparsers.add_parser('tail', help='Tail transcript log')
     tail_parser.add_argument('session_id', help='Session ID')
@@ -273,6 +313,8 @@ def main():
         show_session_info(args.session_id)
     elif args.command == 'commands':
         show_commands(args.session_id, last_n=args.last)
+    elif args.command == 'interactions':
+        show_interactions(args.session_id, last_n=args.last)
     elif args.command == 'tail':
         tail_transcript(args.session_id, follow=args.follow)
     elif args.command == 'cleanup':

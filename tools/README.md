@@ -22,6 +22,10 @@ python tools/session_viewer.py info <session-id>
 python tools/session_viewer.py commands <session-id>
 python tools/session_viewer.py commands <session-id> -n 10  # Last 10 commands
 
+# Show formatted command/output interactions
+python tools/session_viewer.py interactions <session-id>
+python tools/session_viewer.py interactions <session-id> -n 5  # Last 5 interactions
+
 # Tail session transcript (raw PTY output)
 python tools/session_viewer.py tail <session-id>
 python tools/session_viewer.py tail -f <session-id>  # Follow in real-time
@@ -36,6 +40,7 @@ Each session creates these files in `~/.piloty/sessions/<session-id>/`:
 - `session.json` - Metadata (start/end time, PID, initial directory)
 - `commands.log` - Timestamped list of executed commands
 - `transcript.log` - Raw PTY output (includes prompts, ANSI codes)
+- `interaction.log` - Formatted command/output pairs for easy reading
 - `state.json` - Current state (directory, active handler, background jobs)
 
 Active sessions have symlinks in `~/.piloty/active/`.

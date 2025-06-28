@@ -85,6 +85,23 @@ class SessionLogger:
         with open(commands_file, 'a') as f:
             f.write(f"{timestamp} $ {command}\n")
             
+    def log_interaction(self, command: str, output: str):
+        """Log a command and its output to formatted transcript.
+        
+        Args:
+            command: The command that was executed
+            output: The output from the command
+        """
+        timestamp = datetime.now().isoformat()
+        interaction_file = self.session_dir / "interaction.log"
+        
+        # Append to interaction log
+        with open(interaction_file, 'a') as f:
+            f.write(f"\n[{timestamp}]\n")
+            f.write(f"$ {command}\n")
+            if output:
+                f.write(f"{output}\n")
+            
     def log_output(self, data: str):
         """Log output to transcript.log.
         
