@@ -25,7 +25,8 @@ class SessionManager:
     def get_session(self, session_id: str) -> ShellSession:
         """Retrieve an existing ShellSession by ID, or create a new one if not present."""
         if session_id not in self.sessions:
-            self.sessions[session_id] = ShellSession()
+            # Pass session_id to ShellSession for logging
+            self.sessions[session_id] = ShellSession(session_id=session_id)
         return self.sessions[session_id]
 
     def terminate_all_sessions(self):

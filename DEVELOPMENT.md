@@ -47,7 +47,33 @@ The PTY Playground is an interactive REPL for testing PiloTY functionality witho
 python tools/pty_playground.py
 ```
 
+### Session Viewer
+
+Inspect PTY session logs and state:
+
+```bash
+# List active sessions
+python tools/session_viewer.py list
+
+# View session details
+python tools/session_viewer.py info <session-id>
+
+# Follow transcript in real-time
+python tools/session_viewer.py tail -f <session-id>
+```
+
 See [tools/README.md](tools/README.md) for detailed usage.
+
+## Session Logging
+
+PiloTY automatically logs all sessions to `~/.piloty/`:
+
+- **Active sessions**: Symlinked in `~/.piloty/active/`
+- **All sessions**: Stored in `~/.piloty/sessions/`
+- **Log files**: commands.log, transcript.log, state.json
+- **Disable logging**: Pass `enable_logging=False` to ShellSession
+
+This makes debugging much easier as you can inspect exactly what happened in any session.
 
 ## Architecture Overview
 

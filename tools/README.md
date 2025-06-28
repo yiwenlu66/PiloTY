@@ -2,6 +2,44 @@
 
 This directory contains utilities for developing and testing PiloTY.
 
+## Session Viewer
+
+The Session Viewer (`session_viewer.py`) allows you to inspect PTY session logs stored in `~/.piloty/`.
+
+### Usage
+
+```bash
+# List active sessions
+python tools/session_viewer.py list
+
+# List all sessions (including ended ones)
+python tools/session_viewer.py list --all
+
+# Show detailed session information
+python tools/session_viewer.py info <session-id>
+
+# Show command history
+python tools/session_viewer.py commands <session-id>
+python tools/session_viewer.py commands <session-id> -n 10  # Last 10 commands
+
+# Tail session transcript (raw PTY output)
+python tools/session_viewer.py tail <session-id>
+python tools/session_viewer.py tail -f <session-id>  # Follow in real-time
+
+# Clean up stale session symlinks
+python tools/session_viewer.py cleanup
+```
+
+### Session Files
+
+Each session creates these files in `~/.piloty/sessions/<session-id>/`:
+- `session.json` - Metadata (start/end time, PID, initial directory)
+- `commands.log` - Timestamped list of executed commands
+- `transcript.log` - Raw PTY output (includes prompts, ANSI codes)
+- `state.json` - Current state (directory, active handler, background jobs)
+
+Active sessions have symlinks in `~/.piloty/active/`.
+
 ## PTY Playground
 
 The PTY Playground (`pty_playground.py`) is an interactive tool that allows developers to test and explore PiloTY's functionality without going through the MCP interface.

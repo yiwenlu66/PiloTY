@@ -9,18 +9,39 @@ import pexpect
 from .utils import clean_output
 from .handler_manager import HandlerManager
 from .handlers import SSHHandler
+from .session_logger import SessionLogger
+
+
+class TranscriptLogger:
+    """Adapter to feed pexpect output to SessionLogger."""
+    
+    def __init__(self, logger):
+        self.logger = logger
+        
+    def write(self, data):
+        """Called by pexpect with output data."""
+        if isinstance(data, bytes):
+            data = data.decode('utf-8', errors='replace')
+        self.logger.log_output(data)
+        
+    def flush(self):
+        """Required by file-like interface."""
+        pass
 
 
 class ShellSession:
     """Manages an interactive Bash shell session using pexpect."""
 
-    def __init__(self):
+    def __init__(self, session_id=None, enable_logging=True):
         self.ps1 = "MCP> "
         self.ps2 = "MCP_CONT> "  # unique PS2
         
         # Initialize handler manager
         self.handler_manager = HandlerManager()
         self._register_handlers()
+        
+        # Initialize session logger
+        self.logger = SessionLogger(session_id) if enable_logging else None
         
         session_env = {
             **os.environ,
@@ -44,11 +65,20 @@ class ShellSession:
         except pexpect.TIMEOUT:
             pass
 
+        # Set up transcript logging
+        if self.logger:
+            # Use pexpect's logging feature to capture all output
+            self.process.logfile_read = TranscriptLogger(self.logger)
+        
         # Custom PS1/PS2 so we always know where we are
         self.process.sendline(f"PS1='{self.ps1}'")
         self.process.expect(self.ps1, timeout=5)
         self.process.sendline(f"PS2='{self.ps2}'")
         self.process.expect(self.ps1, timeout=5)
+        
+        # Initial state logging
+        if self.logger:
+            self._update_state()
     
     def _register_handlers(self):
         """Register available handlers."""
@@ -58,6 +88,10 @@ class ShellSession:
         """Terminate the shell session."""
         if self.process.isalive():
             self.process.terminate(force=True)
+        
+        # Close logger
+        if self.logger:
+            self.logger.close()
     
     def poll_output(self, timeout: float = 0.1, flush: bool = True) -> str:
         """
@@ -121,9 +155,16 @@ class ShellSession:
         """
         logging.info(f"Running command: {command}")
         
+        # Log command if logger is enabled
+        if self.logger:
+            self.logger.log_command(command)
+        
         # First check if handler wants to process this command
         output, handled = self.handler_manager.process_command(self, command)
         if handled:
+            # Update state after handler processing
+            if self.logger:
+                self._update_state()
             return output
         
         # Get prompts from handler or use defaults
@@ -151,6 +192,10 @@ class ShellSession:
             
             # Post-process output through handler
             output = self.handler_manager.post_process_output(output, command)
+            
+            # Update state after successful command
+            if self.logger:
+                self._update_state()
             
             return output.rstrip("\r\n")
 
@@ -192,4 +237,26 @@ class ShellSession:
         }
         # Merge handler info
         return {**base_info, **handler_info}
+    
+    def _update_state(self):
+        """Update session state in logger."""
+        if not self.logger:
+            return
+            
+        # Build state dictionary (simplified to avoid recursion)
+        state = {
+            "current_directory": os.getcwd(),  # Use Python's cwd for now
+            "background_jobs": []  # Skip jobs check to avoid recursion
+        }
+        
+        # Add handler info if active
+        if self.handler_manager.has_active_handler:
+            handler_info = self.handler_manager.get_active_handler_info()
+            state["active_handler"] = handler_info.get("handler_type")
+            state["handler_context"] = handler_info.get("context", {})
+        else:
+            state["active_handler"] = None
+            state["handler_context"] = None
+            
+        self.logger.update_state(state)
     
