@@ -14,32 +14,70 @@ PiloTY is built upon the foundational work of [pty-mcp](https://github.com/qodo-
 
 ## Installation
 
-### Option 1: Install with pipx (Recommended)
+### Option 1: Install with uv (Recommended)
 
-This is the recommended way to install PiloTY as it creates an isolated environment:
+The fastest and most reliable way to install PiloTY:
 
-1. Install pipx if you haven't already:
-   ```bash
-   python -m pip install --user pipx
-   pipx ensurepath
-   ```
+```bash
+# Install uv if you haven't already
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-2. Install PiloTY:
-   ```bash
-   pipx install git+https://github.com/yiwenlu66/PiloTY.git
-   ```
+# Install PiloTY globally
+uv tool install git+https://github.com/yiwenlu66/PiloTY.git
 
-The server will be available as `piloty` in your path.
+# Update shell PATH if needed
+uv tool update-shell
+```
 
-### Option 2: Install from source
+### Option 2: Install with pipx
+
+Alternative installation using pipx:
+
+```bash
+# Install pipx if you haven't already
+python -m pip install --user pipx
+pipx ensurepath
+
+# Install PiloTY
+pipx install git+https://github.com/yiwenlu66/PiloTY.git
+```
+
+### Option 3: Install from source
 
 For development or testing:
 
 ```bash
 git clone https://github.com/yiwenlu66/PiloTY.git
 cd PiloTY
+
+# Using uv (recommended)
+uv tool install .
+
+# Or using pip in development mode
 pip install -e .
 ```
+
+After installation, verify the `piloty` command is available:
+
+```bash
+which piloty  # Should show the installed location
+```
+
+## Usage with Claude Code
+
+Add PiloTY to your Claude Code configuration in `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "piloty": {
+      "command": "piloty"
+    }
+  }
+}
+```
+
+**Important**: Restart Claude Code completely after adding the configuration.
 
 ## Usage with Claude Desktop
 
@@ -63,35 +101,80 @@ Add the following to your Claude Desktop configuration:
 - **Handler Architecture**: Extensible system for adding new interactive programs
 - **PTY Control**: True terminal emulation for authentic interactions
 
+## Session Logging
+
+PiloTY automatically logs all terminal sessions to `~/.piloty/` for debugging and inspection:
+
+- **Active sessions**: `~/.piloty/active/` (symlinks to active sessions)
+- **Session history**: `~/.piloty/sessions/` (persistent logs for all sessions)
+- **Command history**: Timestamped commands and outputs
+- **Session state**: Working directory, background jobs, active handlers
+
+Use the [session viewer tool](tools/README.md) to inspect session logs, or browse the files directly with standard UNIX tools like `tail`, `grep`, and `cat`.
+
 ## Developer Resources
 
 - **[Development Guide](DEVELOPMENT.md)**: Architecture details and how to extend PiloTY
 - **[Developer Tools](tools/README.md)**: Interactive PTY playground for testing
 - **[Technical Design](TECHNICAL.md)**: Detailed architecture and philosophy
 
-## Quick Examples
+## Testing Integration
 
-### Basic Commands
-```python
-# Execute commands with persistent state
-run("cd /tmp")
-run("pwd")  # Returns: /tmp
+After configuration, test PiloTY in Claude Code by asking it to perform terminal tasks:
 
-# Background processes
-run("sleep 10 &")
-check_jobs()  # Shows running background job
-monitor_output()  # Polls for background output
+> "Please run 'echo Hello from PiloTY' in a terminal session"
+
+> "Change to the /tmp directory and show me the current working directory"
+
+> "SSH into my server and check the disk usage with df -h"
+
+> "Start a background process to download a file and monitor its progress"
+
+> "Check what background jobs are running in my session"
+
+The AI will automatically use PiloTY's MCP tools to execute these requests while maintaining session state across commands.
+
+## Use Cases
+
+### Stateful Development Workflows
+
+> "Change to my project directory, activate the virtual environment, and run the tests"
+
+> "Install the dependencies, build the project, and run the linter"
+
+### Remote Server Management  
+
+> "SSH into my production server, check the logs in /var/log/, and restart the nginx service"
+
+> "Connect to my database server and show me the current connections"
+
+### Background Process Monitoring
+
+> "Start a long-running data processing script in the background and check on its progress every few minutes"
+
+> "Download a large file using wget in the background and let me know when it's done"
+
+### Interactive Debugging
+
+> "Run my Python script with ipdb and set a breakpoint at line 42"
+
+> "Start a tmux session on my remote server and attach to an existing session"
+
+## Testing and Development
+
+### Manual Testing
+
+For hands-on testing and development:
+
+```bash
+python tools/pty_playground.py
 ```
 
-### SSH Sessions
-```python
-# Interactive SSH (requires key-based auth)
-run("ssh user@host")
-run("ls -la")  # Runs on remote host
-run("exit")   # Returns to local shell
-```
+### Integration Testing
 
-## Testing
+Use PiloTY through AI agents (Claude Code, Claude Desktop, etc.) by asking them to perform terminal tasks in natural language.
+
+### Automated Tests
 
 Run the test suite:
 
@@ -99,12 +182,6 @@ Run the test suite:
 python tests/test_background_processes.py
 python tests/test_poll_output.py
 python tests/test_ssh.py
-```
-
-For interactive testing, use the PTY playground:
-
-```bash
-python tools/pty_playground.py
 ```
 
 ## License
