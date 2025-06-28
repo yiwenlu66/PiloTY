@@ -11,7 +11,7 @@ def show_help():
     print("\nAvailable slash commands:")
     print("  /help                    - Show this help message")
     print("  /exit, /quit             - Exit the test environment")
-    print("  /get_output_since [timeout] - Get output since last command (default timeout: 0.1)")
+    print("  /poll_output [timeout] [flush] - Poll for output (timeout: 0.1s, flush: true)")
     print("  /run_background <command> - Run a command in background")
     print("  /check_jobs              - Check status of background jobs")
     print("  /session_info            - Get current session information")
@@ -38,10 +38,14 @@ def handle_slash_command(session, command):
             show_help()
             return True
             
-        elif cmd == '/get_output_since':
-            timeout = float(args) if args else 0.1
-            result = session.get_output_since(timeout=timeout)
-            print(f"\nAPI Result (get_output_since, timeout={timeout}):")
+        elif cmd == '/poll_output':
+            # Parse arguments: timeout and flush
+            parts = args.split() if args else []
+            timeout = float(parts[0]) if len(parts) > 0 else 0.1
+            flush = parts[1].lower() != 'false' if len(parts) > 1 else True
+            
+            result = session.poll_output(timeout=timeout, flush=flush)
+            print(f"\nAPI Result (poll_output, timeout={timeout}, flush={flush}):")
             if result:
                 print(result)
             else:

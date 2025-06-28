@@ -59,26 +59,53 @@ class ShellSession:
         if self.process.isalive():
             self.process.terminate(force=True)
     
-    def get_output_since(self, timeout: float = 0.1) -> str:
+    def poll_output(self, timeout: float = 0.1, flush: bool = True) -> str:
         """
-        Get any output that appeared since last command without sending a new command.
+        Poll for any available output from the PTY.
         
-        Note: In practice, background process output is automatically captured by the
-        next run() command, so this method may not capture background output as expected.
-        Background output and job completion notices appear mixed with the next command's output.
+        Background process output is buffered by the kernel's TTY subsystem and may not
+        be immediately available. The flush parameter triggers a minimal PTY interaction
+        to make buffered data available.
+        
+        Args:
+            timeout: Read timeout in seconds
+            flush: If True, send space+backspace to trigger kernel buffer flush
+            
+        Returns:
+            Any output available from the PTY
         """
+        if flush and self.process.isalive():
+            # Send space + backspace to trigger TTY buffer flush
+            # This causes minimal side effects while making buffered output available
+            self.process.send(' \b')
+            time.sleep(0.1)  # Give kernel time to flush buffers
+        
+        # Now read available output
         try:
             output = ""
+            # Read in a loop with short timeout to get all available data
             while True:
-                chunk = self.process.read_nonblocking(size=1024, timeout=timeout)
-                if chunk:
-                    output += chunk
-                else:
+                try:
+                    chunk = self.process.read_nonblocking(size=2048, timeout=timeout)
+                    if chunk:
+                        output += chunk
+                        # Continue reading with shorter timeout if we got data
+                        timeout = 0.05
+                    else:
+                        break
+                except pexpect.TIMEOUT:
                     break
+                except pexpect.EOF:
+                    break
+                    
+            # Clean up output - remove any prompts that might have appeared
+            if output and self.ps1 in output:
+                # Remove prompt if it appears at the end
+                output = output.replace(self.ps1, '')
+            
             return output.rstrip("\r\n")
-        except pexpect.TIMEOUT:
-            return ""
-        except pexpect.EOF:
+        except Exception as e:
+            logging.error(f"Error in poll_output: {e}")
             return ""
     
     def _clean_output(self, text: str, command: str = None) -> str:
@@ -435,32 +462,32 @@ def run(session_id: str, command: str) -> str:
 
 
 @mcp.tool()
-def monitor_output(session_id: str, duration: float = 1.0) -> str:
+def monitor_output(session_id: str, duration: float = 1.0, flush: bool = True) -> str:
     """
-    Monitor PTY output for a specified duration without running any commands.
+    Poll PTY output for a specified duration without running any commands.
     
-    Note: Background process output typically appears mixed with the next run() command.
-    This tool may not capture background output as expected. To get background process
-    output, simply run another command (even an empty echo) and the background output
-    will be included.
+    Background process output is buffered by the kernel's TTY subsystem. The flush
+    parameter triggers a minimal PTY interaction (space+backspace) to make buffered
+    data available for reading.
     
     Args:
         session_id: The ID of the shell session to monitor.
-        duration: How long to monitor for output (in seconds, max 10).
+        duration: How long to poll for output (in seconds, max 10).
+        flush: If True, trigger kernel buffer flush to get background output.
     
     Returns:
-        Any output that appeared during the monitoring period.
+        Any output available from the PTY.
     
     Example:
-        >>> run("session1", "echo 'Background task' &")
+        >>> run("session1", "for i in {1..5}; do echo $i; sleep 1; done &")
         '[1] 12345'
-        >>> run("session1", "echo 'Next'")  # Background output appears here
-        'Background task\nNext\n[1]+  Done  echo "Background task"'
+        >>> monitor_output("session1", flush=True)  # Gets background output
+        '1\n2\n3\n4\n5\n[1]+  Done  for i in {1..5}...'
     """
     # Limit duration to reasonable values
     duration = min(duration, 10.0)
     session = session_manager.get_session(session_id)
-    return session.get_output_since(timeout=duration)
+    return session.poll_output(timeout=duration, flush=flush)
 
 
 @mcp.tool()
