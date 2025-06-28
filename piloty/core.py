@@ -7,6 +7,8 @@ import time
 import pexpect
 
 from .utils import clean_output
+from .handler_manager import HandlerManager
+from .handlers import SSHHandler
 
 
 class ShellSession:
@@ -16,11 +18,9 @@ class ShellSession:
         self.ps1 = "MCP> "
         self.ps2 = "MCP_CONT> "  # unique PS2
         
-        # Session state (can be updated by handlers)
-        self.is_ssh_session = False
-        self.ssh_host = None
-        self.remote_ps1 = "REMOTE_MCP> "
-        self.remote_ps2 = "REMOTE_CONT> "
+        # Initialize handler manager
+        self.handler_manager = HandlerManager()
+        self._register_handlers()
         
         session_env = {
             **os.environ,
@@ -49,6 +49,10 @@ class ShellSession:
         self.process.expect(self.ps1, timeout=5)
         self.process.sendline(f"PS2='{self.ps2}'")
         self.process.expect(self.ps1, timeout=5)
+    
+    def _register_handlers(self):
+        """Register available handlers."""
+        self.handler_manager.register_handler(SSHHandler)
 
     def terminate(self):
         """Terminate the shell session."""
@@ -117,28 +121,24 @@ class ShellSession:
         """
         logging.info(f"Running command: {command}")
         
-        # Choose prompts based on current state
-        if self.is_ssh_session:
-            prompts = [self.remote_ps1, self.remote_ps2]
+        # First check if handler wants to process this command
+        output, handled = self.handler_manager.process_command(self, command)
+        if handled:
+            return output
+        
+        # Get prompts from handler or use defaults
+        handler_prompts = self.handler_manager.get_prompt_patterns()
+        if handler_prompts:
+            prompt_patterns = handler_prompts
         else:
             prompts = [self.ps1, self.ps2]
+            prompt_patterns = [
+                r'\r?\n?' + re.escape(prompts[0]),  # PS1 at start of line
+                r'\r?\n?' + re.escape(prompts[1])   # PS2 at start of line
+            ]
         
         try:
             self.process.sendline(command)
-            # Use more specific patterns that match prompts at beginning of line
-            # For SSH sessions, we need to be more careful about prompt matching
-            if self.is_ssh_session:
-                # Match prompts including zsh's % formatting and bracketed paste mode
-                # The pattern needs to match: \r\n%[spaces]\r \r\rPROMPT[optional bracketed paste]
-                prompt_patterns = [
-                    r'(?:\r\n%\s+\r\s+\r)?' + re.escape(prompts[0]) + r'(?:\s*\x1b\[\?2004h)?',  # PS1 with zsh formatting
-                    r'(?:\r\n%\s+\r\s+\r)?' + re.escape(prompts[1]) + r'(?:\s*\x1b\[\?2004h)?'   # PS2 with zsh formatting
-                ]
-            else:
-                prompt_patterns = [
-                    r'\r?\n?' + re.escape(prompts[0]),  # PS1 at start of line
-                    r'\r?\n?' + re.escape(prompts[1])   # PS2 at start of line
-                ]
             idx = self.process.expect(prompt_patterns, timeout=timeout)
 
             # idx == 1 -> we matched PS2 -> syntax error / unbalanced quotes
@@ -149,11 +149,8 @@ class ShellSession:
 
             output = self.process.before or ""
             
-            # Clean output if in SSH session
-            if self.is_ssh_session:
-                output = clean_output(output, command, is_ssh=True, 
-                                    remote_ps1=self.remote_ps1, 
-                                    remote_ps2=self.remote_ps2)
+            # Post-process output through handler
+            output = self.handler_manager.post_process_output(output, command)
             
             return output.rstrip("\r\n")
 
@@ -163,10 +160,6 @@ class ShellSession:
             return "Error: Command timed out"
         except pexpect.EOF:
             logging.error("Session terminated unexpectedly")
-            # Reset SSH state if connection dropped
-            if self.is_ssh_session:
-                self.is_ssh_session = False
-                self.ssh_host = None
             return "Error: Session terminated unexpectedly"
         except Exception as e:
             return f"Error: {e}"
@@ -192,19 +185,11 @@ class ShellSession:
     
     def get_session_info(self) -> dict:
         """Get current session information."""
-        return {
-            'is_ssh': self.is_ssh_session,
-            'ssh_host': self.ssh_host,
-            'prompt': self.remote_ps1 if self.is_ssh_session else self.ps1
+        handler_info = self.handler_manager.get_active_handler_info()
+        base_info = {
+            'prompt': self.ps1,
+            'has_active_handler': self.handler_manager.has_active_handler
         }
+        # Merge handler info
+        return {**base_info, **handler_info}
     
-    def update_state(self, state_updates: dict):
-        """
-        Update session state from handler results.
-        
-        Args:
-            state_updates: Dictionary with state updates from handlers
-        """
-        for key, value in state_updates.items():
-            if hasattr(self, key):
-                setattr(self, key, value)

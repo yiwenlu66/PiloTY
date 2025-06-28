@@ -6,7 +6,6 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from .core import ShellSession
-from .handlers import ssh
 
 # Configure file logging
 logger = logging.getLogger()
@@ -68,19 +67,7 @@ def run(session_id: str, command: str) -> str:
     # Get or create the shell session for the given session_id
     session = session_manager.get_session(session_id)
     
-    # Check for SSH command
-    if ssh.detect_ssh_command(command):
-        output, state_updates = ssh.handle_ssh_connection(session, command)
-        session.update_state(state_updates)
-        return output
-    
-    # Check for SSH exit
-    if session.is_ssh_session and command.strip() == 'exit':
-        output, state_updates = ssh.handle_ssh_exit(session, command)
-        session.update_state(state_updates)
-        return output
-    
-    # Default execution
+    # Execute command - handlers are now managed internally
     return session.run(command)
 
 
@@ -125,15 +112,17 @@ def get_session_info(session_id: str) -> dict:
     
     Returns:
         Dictionary with session information:
-        - is_ssh: Whether currently in an SSH session
-        - ssh_host: The remote host if in SSH, None otherwise
         - prompt: The current prompt being used
+        - has_active_handler: Whether a handler is currently active
+        - active: Whether a handler is active
+        - handler_type: The type of active handler (e.g., 'SSHHandler')
+        - context: Handler-specific context information
     
     Example:
         >>> run("session1", "ssh user@server")
         'Connected to user@server'
         >>> get_session_info("session1")
-        {'is_ssh': True, 'ssh_host': 'user@server', 'prompt': 'REMOTE_MCP> '}
+        {'prompt': 'MCP> ', 'has_active_handler': True, 'active': True, 'handler_type': 'SSHHandler', 'context': {'active': True, 'host': 'user@server', 'remote_ps1': 'REMOTE_MCP> ', 'remote_ps2': 'REMOTE_CONT> ', 'prompt_set': True}}
     """
     session = session_manager.get_session(session_id)
     return session.get_session_info()
