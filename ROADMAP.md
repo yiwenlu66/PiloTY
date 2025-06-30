@@ -25,6 +25,7 @@ Enhance the robustness and capabilities of existing terminal operations:
 - **Enhanced error handling** - Better recovery from failed commands and connection issues
 - **Multi-line command improvements** - Robust handling of complex scripts and here-documents
 - **Output separation** - Clean stdout/stderr separation for better command result parsing
+- **Playground UX improvements** - Add fzf-style hints for slash commands and arrow key navigation for command history
 
 ### Priority 2: REPL Support 🎯
 
