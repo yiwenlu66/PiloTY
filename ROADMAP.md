@@ -22,6 +22,7 @@ PiloTY has achieved solid foundational capabilities:
 Enhance the robustness and capabilities of existing terminal operations:
 
 - **Password authentication** - Support for SSH password login, sudo commands, and other password-requiring tools
+- **Interactive prompt handling** - Support for programs that request user input during operation (e.g., oh-my-zsh update prompts during SSH connection, apt asking for confirmation, etc.)
 - **Enhanced error handling** - Better recovery from failed commands and connection issues
 - **Multi-line command improvements** - Robust handling of complex scripts and here-documents
 - **Output separation** - Clean stdout/stderr separation for better command result parsing

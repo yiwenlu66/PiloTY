@@ -4,6 +4,8 @@
 
 > **⚠️ Work in Progress**: This project is under active development and not ready for production use yet.
 
+> **🔴 Security Warning**: PiloTY provides unrestricted terminal access that can "jailbreak" permission controls. For example, while Claude Code requires approval for each bash command, PiloTY's `run` tool can execute ANY command without additional checks. Only use with trusted AI systems and understand the security implications.
+
 PiloTY (Pilot + PTY) bridges AI agents and terminal interfaces through the Model Context Protocol, providing stateful terminal sessions with support for interactive applications, SSH connections, and background processes.
 
 📖 **[Read the technical design document](TECHNICAL.md)** for detailed architecture and use cases.
