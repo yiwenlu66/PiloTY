@@ -25,6 +25,13 @@ htmlcov/
 # generated
 qodo-cover-mcp.md
 
+# codex task artifacts (do not commit)
+PROMPT.md
+LOG.md
+
+# local agent artifacts
+.serena/
+
 # Virtual environment
 venv/
 __pycache__/

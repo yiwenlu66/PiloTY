@@ -6,6 +6,7 @@ authors = [{ name = "David Wurtz", email = "david.w@qodo.ai" }]
 dependencies = [
   "mcp>=1.2.1",
   "pexpect>=4.9.0",
+  "pyte>=0.8.0",
 ]
 requires-python = ">=3.10"
 readme = "README.md"

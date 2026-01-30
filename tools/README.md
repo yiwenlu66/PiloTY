@@ -75,16 +75,19 @@ The playground provides a REPL-like interface where you can:
 
 - `/help` - Show available commands
 - `/exit`, `/quit` - Exit the playground
-- `/poll_output [timeout] [flush]` - Poll for background process output
-  - `timeout`: How long to wait (default: 0.1 seconds)
-  - `flush`: Whether to flush kernel buffers (default: true)
-- `/check_jobs` - Check status of background jobs
-- `/session_info` - Get current session information (handler state, etc.)
+- `/read` - Show the current rendered screen
+- `/state` - Heuristic state detection from the rendered screen
+- `/transcript` - Show transcript file path
+- `/poll_output [timeout]` - Drain pending output without input
+- `/check_jobs` - Run `jobs -l` in the session
+- `/ctrl <key>` - Send control keys (Ctrl+C, Ctrl+D, etc)
+- `/raw <text>` - Send without newline
+- `/status` - Show basic PTY status
 
 ### Example Session
 
 ```
-🎮 PTY Playground - Interactive Terminal Control
+PTY Playground - Quiescence-based Terminal
 ==================================================
 This tool lets you interact with PiloTY directly.
 Type /help for available commands or /exit to quit
@@ -104,32 +107,14 @@ Output:
 
 > /check_jobs
 
-API Result (check_jobs):
-[
-  {
-    "job_id": 1,
-    "pid": 12345,
-    "status": "Running",
-    "command": "sleep 5 &"
-  }
-]
+Output:
+[1]  12345 Running                 sleep 5 &
 
 > ssh user@example.com
 
 Running: ssh user@example.com
 Output:
 Error: SSH connection failed: Could not resolve hostname example.com
-
-> /session_info
-
-API Result (session_info):
-{
-  "prompt": "MCP> ",
-  "has_active_handler": false,
-  "active": false,
-  "handler_type": null,
-  "context": null
-}
 
 > /exit
 
@@ -138,10 +123,9 @@ Session terminated
 
 ### Use Cases
 
-1. **Testing new handlers** - Verify handler activation and behavior
-2. **Debugging PTY issues** - See exactly what's happening in the terminal
-3. **Testing edge cases** - Try complex command sequences interactively
-4. **Understanding PiloTY's API** - Explore what each method returns
+1. **Debugging PTY issues** - See exactly what's happening in the terminal
+2. **Testing edge cases** - Try complex command sequences interactively
+3. **Understanding PiloTY's API** - Explore tool semantics (quiescence, state detection)
 
 ### Tips
 

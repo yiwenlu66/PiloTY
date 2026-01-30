@@ -2,126 +2,171 @@
 """
 PTY Playground - Interactive development tool for PiloTY.
 
-This tool provides an interactive environment to test and explore PiloTY's
-functionality without going through the MCP interface. It's useful for:
-- Testing handler behavior
-- Debugging PTY interactions
-- Exploring edge cases
-- Manual testing during development
+Uses quiescence-based PTY with heuristic state detection.
+Human acts as the "sampling LLM" for complex state interpretation.
 """
+
 import sys
-import json
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from piloty.core import ShellSession
+from piloty.core import PTY
+from piloty.mcp_server import detect_state_heuristic
+
 
 def show_help():
-    """Show available slash commands."""
-    print("\nAvailable slash commands:")
-    print("  /help                    - Show this help message")
-    print("  /exit, /quit             - Exit the test environment")
-    print("  /poll_output [timeout] [flush] - Poll for output (timeout: 0.1s, flush: true)")
-    print("  /check_jobs              - Check status of background jobs")
-    print("  /session_info            - Get current session information")
-    print("\nRegular commands (not starting with /) are sent to the PTY.")
-    print("Type 'exit' without slash to send it to PTY (e.g., to exit SSH).\n")
+    """Show available commands."""
+    print("""
+Commands:
+  /help          - Show this help
+  /exit, /quit   - Exit playground
+  /read          - Get current screen content
+  /state         - Detect terminal state (heuristic)
+  /transcript    - Show transcript file path
+  /poll_output [timeout] - Drain pending output without input
+  /check_jobs    - Run 'jobs -l' in session
+  /ctrl <key>    - Send control character (c, d, z, l, [)
+  /status        - Show PTY status
 
-def format_result(result):
-    """Format API result for display."""
-    if isinstance(result, (dict, list)):
-        return json.dumps(result, indent=2)
-    return str(result)
+Input:
+  Regular text (without /) is sent as a command with newline.
+  Use /raw <text> to send without newline.
+  Use /ctrl c to send Ctrl+C.
+""")
 
-def handle_slash_command(session, command):
-    """Handle slash commands that call API methods."""
-    parts = command.split(maxsplit=1)
-    cmd = parts[0].lower()
-    args = parts[1] if len(parts) > 1 else ""
-    
-    try:
-        if cmd in ['/exit', '/quit']:
-            return None  # Signal to exit
-            
-        elif cmd == '/help':
-            show_help()
-            return True
-            
-        elif cmd == '/poll_output':
-            # Parse arguments: timeout and flush
-            parts = args.split() if args else []
-            timeout = float(parts[0]) if len(parts) > 0 else 0.1
-            flush = parts[1].lower() != 'false' if len(parts) > 1 else True
-            
-            result = session.poll_output(timeout=timeout, flush=flush)
-            print(f"\nAPI Result (poll_output, timeout={timeout}, flush={flush}):")
-            if result:
-                print(result)
-            else:
-                print("(no output)")
-            return True
-            
-        elif cmd == '/check_jobs':
-            result = session.check_jobs()
-            print(f"\nAPI Result (check_jobs):")
-            if result:
-                print(format_result(result))
-            else:
-                print("No background jobs")
-            return True
-            
-        elif cmd == '/session_info':
-            result = session.get_session_info()
-            print(f"\nAPI Result (session_info):")
-            print(format_result(result))
-            return True
-            
-        else:
-            print(f"Unknown slash command: {cmd}")
-            print("Type /help for available commands")
-            return True
-            
-    except Exception as e:
-        print(f"Error executing {cmd}: {e}")
-        return True
+
+def send_control(pty, key):
+    """Send control character."""
+    key = key.lower()
+    if key == "[" or key == "escape" or key == "esc":
+        char = "\x1b"
+    elif len(key) == 1 and key.isalpha():
+        char = chr(ord(key) - ord("a") + 1)
+    else:
+        print(f"Unknown control key: {key}")
+        return
+
+    result = pty.type(char, timeout=2.0, quiescence_ms=300)
+    print(f"Status: {result['status']}")
+    screen = pty.read()
+    state, reason = detect_state_heuristic(screen)
+    print(f"State: {state} ({reason})")
+    print(f"Screen:\n{screen}")
+
 
 def main():
-    # Create a shell session
-    session = ShellSession()
-    
-    print("🎮 PTY Playground - Interactive Terminal Control")
+    pty = PTY(session_id="playground")
+
+    print("PTY Playground - Quiescence-based Terminal")
     print("=" * 50)
-    print("This tool lets you interact with PiloTY directly.")
-    print("Type /help for available commands or /exit to quit")
+    print("Type /help for commands or /exit to quit")
+    print(f"Transcript: {pty.transcript()}")
     print("-" * 50)
-    
+
+    # Show initial screen
+    screen = pty.read()
+    state, reason = detect_state_heuristic(screen)
+    print(f"\nInitial state: {state} ({reason})")
+    print(f"Screen:\n{screen}")
+
     try:
         while True:
-            # Get command from user
-            command = input("\n> ")
-            
+            try:
+                command = input("\n> ")
+            except EOFError:
+                break
+
             if not command:
                 continue
-            
-            # Check if it's a slash command
-            if command.startswith('/'):
-                result = handle_slash_command(session, command)
-                if result is None:  # Exit signal
+
+            # Slash commands
+            if command.startswith("/"):
+                parts = command.split(maxsplit=1)
+                cmd = parts[0].lower()
+                args = parts[1] if len(parts) > 1 else ""
+
+                if cmd in ["/exit", "/quit"]:
                     break
+
+                elif cmd == "/help":
+                    show_help()
+
+                elif cmd == "/read":
+                    print(f"\nScreen:\n{pty.read()}")
+
+                elif cmd == "/state":
+                    screen = pty.read()
+                    state, reason = detect_state_heuristic(screen)
+                    print(f"\nState: {state}")
+                    print(f"Reason: {reason}")
+
+                elif cmd == "/transcript":
+                    print(f"\nTranscript: {pty.transcript()}")
+
+                elif cmd == "/poll_output":
+                    t = 0.1
+                    if args:
+                        try:
+                            t = float(args.strip())
+                        except ValueError:
+                            print("Usage: /poll_output [timeout]")
+                            continue
+                    result = pty.poll_output(timeout=t, quiescence_ms=100)
+                    print(f"\nStatus: {result['status']}")
+                    print(f"Output:\n{result['output']}")
+
+                elif cmd == "/check_jobs":
+                    result = pty.type("jobs -l\n", timeout=2.0, quiescence_ms=300)
+                    print(f"\nStatus: {result['status']}")
+                    print(f"Output:\n{result['output']}")
+
+                elif cmd == "/ctrl":
+                    if args:
+                        send_control(pty, args)
+                    else:
+                        print("Usage: /ctrl <key>")
+
+                elif cmd == "/status":
+                    print(f"\nAlive: {pty.alive}")
+                    print(f"Transcript: {pty.transcript()}")
+                    screen = pty.read()
+                    state, reason = detect_state_heuristic(screen)
+                    print(f"State: {state} ({reason})")
+
+                elif cmd == "/raw":
+                    if args:
+                        result = pty.type(args, timeout=30.0, quiescence_ms=500)
+                        print(f"Status: {result['status']}")
+                        screen = pty.read()
+                        state, reason = detect_state_heuristic(screen)
+                        print(f"State: {state} ({reason})")
+                        print(f"Output:\n{result['output']}")
+                    else:
+                        print("Usage: /raw <text>")
+
+                else:
+                    print(f"Unknown command: {cmd}")
+                    print("Type /help for available commands")
+
                 continue
-            
-            # Regular command - send to PTY
-            print(f"\nRunning: {command}")
-            result = session.run(command)
-            print(f"Output:\n{result}")
-            
+
+            # Regular command - send with newline
+            print(f"\nSending: {repr(command)}")
+            result = pty.type(command + "\n", timeout=30.0, quiescence_ms=500)
+            print(f"Status: {result['status']}")
+
+            screen = pty.read()
+            state, reason = detect_state_heuristic(screen)
+            print(f"State: {state} ({reason})")
+            print(f"Output:\n{result['output']}")
+
     except KeyboardInterrupt:
-        print("\n\nInterrupted by user")
-    except EOFError:
-        print("\n\nEOF received")
+        print("\n\nInterrupted")
     finally:
-        session.terminate()
+        pty.terminate()
         print("\nSession terminated")
+
 
 if __name__ == "__main__":
     main()

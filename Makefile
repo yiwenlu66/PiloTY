@@ -11,7 +11,7 @@ COLOR_RED = \033[31m
 PYTHON = python3
 VENV = .venv
 BIN = $(VENV)/bin
-PACKAGE_NAME = pty_mcp
+PACKAGE_NAME = piloty
 
 help:  ## Show this help
 	@echo "$(COLOR_BOLD)Available commands:$(COLOR_RESET)"

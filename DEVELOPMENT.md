@@ -6,13 +6,12 @@ This guide covers development practices, architecture details, and how to extend
 
 ```
 piloty/
-├── core.py              # Core PTY session management
-├── handler_manager.py   # Handler registration and coordination
-├── handlers/            # Interactive program handlers
-│   ├── base.py         # Abstract base handler class
-│   └── ssh.py          # SSH connection handler
-├── mcp_server.py       # MCP interface
-└── utils.py            # Utility functions
+├── core.py              # Quiescence-based PTY + VT100 rendering + session logs
+├── mcp_server.py        # MCP interface (tools + state detection)
+├── handler_manager.py   # Deprecated (legacy docs/import compatibility)
+├── handlers/            # Deprecated (legacy docs/import compatibility)
+├── session_logger.py    # Deprecated (legacy docs/import compatibility)
+└── utils.py             # Deprecated (legacy docs/import compatibility)
 
 tests/                   # Automated tests
 tools/                   # Developer utilities
@@ -32,9 +31,7 @@ tools/                   # Developer utilities
 
 2. **Run tests:**
    ```bash
-   python tests/test_background_processes.py
-   python tests/test_poll_output.py
-   python tests/test_ssh.py
+   python -m pytest
    ```
 
 ## Developer Tools
@@ -49,20 +46,13 @@ python tools/pty_playground.py
 
 ### Session Viewer
 
-Inspect PTY session logs and state:
+Inspect session logs under `~/.piloty/`:
 
 ```bash
-# List active sessions
 python tools/session_viewer.py list
-
-# View session details
 python tools/session_viewer.py info <session-id>
-
-# Follow transcript in real-time
 python tools/session_viewer.py tail -f <session-id>
 ```
-
-See [tools/README.md](tools/README.md) for detailed usage.
 
 ## Session Logging
 

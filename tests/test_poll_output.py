@@ -1,46 +1,55 @@
-#!/usr/bin/env python3
-"""Test the new poll_output functionality."""
-import sys
-import time
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import shutil
 
-from piloty.core import ShellSession
+from mcp.server.fastmcp.utilities.context_injection import find_context_parameter
 
-def test_poll_output():
-    session = ShellSession()
-    
+from piloty import mcp_server
+from piloty.core import PTY
+
+
+def test_fastmcp_context_injection_detects_ctx_param():
+    assert find_context_parameter(mcp_server.run) == "ctx"
+    assert find_context_parameter(mcp_server.poll_output) == "ctx"
+
+
+def test_basic_pty_command():
+    pty = PTY(session_id="test_basic")
     try:
-        print("Test 1: Background counter with poll_output")
-        result = session.run("for i in {1..5}; do echo \"Count: $i\"; sleep 0.2; done &")
-        print(f"Background job started: {result}")
-        
-        # Poll multiple times
-        for i in range(3):
-            time.sleep(0.5)
-            output = session.poll_output(timeout=0.1, flush=True)
-            print(f"\nPoll {i+1} result:")
-            if output:
-                print(output)
-            else:
-                print("(no output)")
-                
-        print("\nTest 2: Testing without flush")
-        result = session.run("echo 'Test without flush' &")
-        time.sleep(0.1)
-        
-        output = session.poll_output(timeout=0.1, flush=False)
-        print(f"Without flush: {repr(output)}")
-        
-        output = session.poll_output(timeout=0.1, flush=True)
-        print(f"With flush: {repr(output)}")
-        
-        print("\nTest 3: Check final state")
-        result = session.run("echo 'Done'")
-        print(f"Final command: {repr(result)}")
-        
+        r = pty.type("echo hello\n", timeout=5.0, quiescence_ms=300)
+        assert r["status"] == "quiescent"
+        assert "hello" in r["output"]
     finally:
-        session.terminate()
+        pty.terminate()
 
-if __name__ == "__main__":
-    test_poll_output()
+
+def test_vt100_private_csi_does_not_crash():
+    pty = PTY(session_id="test_private_csi")
+    try:
+        r = pty.type("printf '\\033[?1m\\033[0m\\n'\n", timeout=5.0)
+        assert r["status"] == "quiescent"
+        r = pty.type("printf '\\033[?25l\\033[?25h\\n'\n", timeout=5.0)
+        assert r["status"] == "quiescent"
+        assert getattr(pty, "_vt100_error", None) is None
+    finally:
+        pty.terminate()
+
+
+def test_transcript_written():
+    pty = PTY(session_id="test_transcript")
+    try:
+        path = pty.transcript()
+        r = pty.type("echo 'transcript test'\n", timeout=5.0)
+        assert r["status"] == "quiescent"
+        assert "transcript test" in open(path, "r", encoding="utf-8").read()
+    finally:
+        pty.terminate()
+
+
+def test_ssh_version_does_not_crash_when_present():
+    if shutil.which("ssh") is None:
+        return
+    pty = PTY(session_id="test_ssh_version")
+    try:
+        r = pty.type("ssh -V\n", timeout=5.0)
+        assert r["status"] in ("quiescent", "timeout")
+    finally:
+        pty.terminate()

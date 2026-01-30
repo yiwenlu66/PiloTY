@@ -10,6 +10,16 @@ PiloTY (Pilot + PTY) bridges AI agents and terminal interfaces through the Model
 
 📖 **[Read the technical design document](TECHNICAL.md)** for detailed architecture and use cases.
 
+## Session Model (Agent Responsibilities)
+
+PiloTY exposes a stateful PTY per `session_id`. Agents must treat `session_id` as a persistent handle:
+
+- Reuse the same `session_id` for a multi-step workflow. Do not generate a new ID per command.
+- The PTY keeps process state between calls: working directory, environment variables, running programs.
+- If an agent runs `ssh user@host`, the PTY stays inside that SSH session until the agent exits (`exit`, Ctrl+D) or the connection drops.
+- If an agent starts a REPL or debugger (Python, pdb, ipdb), the PTY stays inside it until exit.
+- The server returns a best-effort `status` plus a rendered `screen`. The agent is responsible for deciding the next action (send input, send control keys, terminate, etc).
+
 ## What You Can Do
 
 **Transform natural language into powerful terminal workflows.** With PiloTY, AI agents can control terminals just like experienced developers - maintaining state, managing SSH sessions, and handling complex multi-step operations through simple conversation.
@@ -34,11 +44,19 @@ PiloTY (Pilot + PTY) bridges AI agents and terminal interfaces through the Model
 
 ### Interactive Debugging
 
-> "Run my Python script with ipdb and set a breakpoint at line 42"
+> "Run my Python script with ipdb and set a breakpoint at line 42 (vibe debugging)"
 
 > "Start a tmux session on my remote server and attach to an existing session"
 
 ## Installation
+
+### Option 0: Run with uvx (single command, no install)
+
+If you have `uvx` available, you can run the MCP server directly from the Git repo:
+
+```bash
+uvx --from git+https://github.com/yiwenlu66/PiloTY.git piloty
+```
 
 ### Option 1: Install with uv (Recommended)
 
@@ -95,11 +113,26 @@ which piloty  # Should show the installed location
 
 Add PiloTY to your Claude Code configuration in `~/.claude.json`:
 
+#### Option A: Installed `piloty`
+
 ```json
 {
   "mcpServers": {
     "piloty": {
       "command": "piloty"
+    }
+  }
+}
+```
+
+#### Option B: `uvx` single-command runner
+
+```json
+{
+  "mcpServers": {
+    "piloty": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/yiwenlu66/PiloTY.git", "piloty"]
     }
   }
 }
@@ -124,23 +157,24 @@ Add the following to your Claude Desktop configuration:
 ## Features
 
 - **Stateful Terminal Sessions**: Maintains context across commands
-- **Interactive Program Support**: SSH, vim, less, and more coming soon
-- **Background Process Management**: Run and monitor long-running processes
-- **Handler Architecture**: Extensible system for adding new interactive programs
-- **PTY Control**: True terminal emulation for authentic interactions
+- **Interactive Programs via PTY**: SSH, REPLs, debuggers, pagers, and TUIs (best-effort state detection)
+- **Background Sessions**: Long-running commands can be monitored by polling output and reading screen state
+- **Session Logging**: Logs to `~/.piloty/` for inspection and debugging
+- **PTY Control**: Terminal emulation with control keys for interrupts and navigation
 
 ## Roadmap
 
 ### ✅ Currently Supported
 - **Stateful shell sessions** - Commands maintain context and working directory
-- **SSH with public key authentication** - Seamless remote server access
-- **Background process management** - Start, monitor, and control long-running tasks
-- **Interactive program handling** - Basic support for SSH and shell interactions
+- **SSH sessions** - PTY remains in SSH until `exit`/disconnect
+- **Background processes** - Use shell job control (`&`, `jobs -l`) plus output polling
+- **REPL/debugger loops** - Python REPL and breakpoint-driven debugging inside a persistent PTY
+- **Best-effort TUI handling** - vim/tmux/pagers do not crash the server; agent drives via screen+keys
 
 ### 🚧 Coming Soon
-- **Password authentication** - Support for SSH and other tools requiring password input
-- **REPL support** - Interactive data analysis with Python, R, and other interpreters
-- **Advanced interactive tools** - Enhanced vim, tmux, and debugger integration
+- **More reliable state detection** - Reduce false READY/RUNNING classifications
+- **Stronger background job introspection** - Job tracking beyond `jobs -l`
+- **Safer credential workflows** - Reduce accidental screen/echo exposure risks
 - **Multi-session management** - Coordinate multiple terminal sessions simultaneously
 
 ## Session Logging
@@ -150,7 +184,7 @@ PiloTY automatically logs all terminal sessions to `~/.piloty/` for debugging an
 - **Active sessions**: `~/.piloty/active/` (symlinks to active sessions)
 - **Session history**: `~/.piloty/sessions/` (persistent logs for all sessions)
 - **Command history**: Timestamped commands and outputs
-- **Session state**: Working directory, background jobs, active handlers
+- **Session state**: Best-effort state snapshot (e.g., screen render health)
 
 Use the [session viewer tool](tools/README.md) to inspect session logs, or browse the files directly with standard UNIX tools like `tail`, `grep`, and `cat`.
 
@@ -195,9 +229,7 @@ Use PiloTY through AI agents (Claude Code, Claude Desktop, etc.) by asking them 
 Run the test suite:
 
 ```bash
-python tests/test_background_processes.py
-python tests/test_poll_output.py
-python tests/test_ssh.py
+python -m pytest
 ```
 
 ## Acknowledgments
@@ -206,4 +238,4 @@ PiloTY is built upon the foundational work of [pty-mcp](https://github.com/qodo-
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the Apache License 2.0 - see `LICENSE`.

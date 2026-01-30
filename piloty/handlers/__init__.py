@@ -1,6 +1,2 @@
-"""Handler modules for specific interactive programs."""
+"""Deprecated handlers package (not used by current implementation)."""
 
-from .base import InteractiveHandler, HandlerContext
-from .ssh import SSHHandler
-
-__all__ = ['InteractiveHandler', 'HandlerContext', 'SSHHandler']

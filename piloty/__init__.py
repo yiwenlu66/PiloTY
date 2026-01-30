@@ -1,14 +1,33 @@
-"""PiloTY: AI Pilot for PTY Operations."""
+"""PiloTY: AI Pilot for PTY Operations.
 
-from .core import ShellSession
-from .mcp_server import session_manager, run, monitor_output, get_session_info, check_jobs
+Quiescence-based PTY with LLM sampling for state interpretation.
+"""
 
-__version__ = "0.1.0"
+from .core import PTY
+from .mcp_server import (
+    session_manager,
+    run,
+    send_input,
+    send_password,
+    send_control,
+    poll_output,
+    read,
+    transcript,
+    terminate,
+    detect_state_heuristic,
+)
+
+__version__ = "0.3.0"
 __all__ = [
-    'ShellSession', 
-    'session_manager', 
-    'run', 
-    'monitor_output', 
-    'get_session_info',
-    'check_jobs'
+    "PTY",
+    "session_manager",
+    "run",
+    "send_input",
+    "send_password",
+    "send_control",
+    "poll_output",
+    "read",
+    "transcript",
+    "terminate",
+    "detect_state_heuristic",
 ]
