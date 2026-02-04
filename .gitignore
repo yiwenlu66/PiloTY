@@ -5,6 +5,7 @@ venv/
 # python
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # build
 build/
@@ -24,6 +25,7 @@ htmlcov/
 
 # generated
 qodo-cover-mcp.md
+uv.lock
 
 # codex task artifacts (do not commit)
 PROMPT.md
@@ -31,14 +33,3 @@ LOG.md
 
 # local agent artifacts
 .serena/
-
-# Virtual environment
-venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-.coverage
-htmlcov/
-dist/
-build/
-*.egg-info/

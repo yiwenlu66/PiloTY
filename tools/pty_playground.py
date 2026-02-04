@@ -21,13 +21,13 @@ def show_help():
 Commands:
   /help          - Show this help
   /exit, /quit   - Exit playground
-  /read          - Get current screen content
-  /state         - Detect terminal state (heuristic)
-  /transcript    - Show transcript file path
-  /poll_output [timeout] - Drain pending output without input
-  /check_jobs    - Run 'jobs -l' in session
-  /ctrl <key>    - Send control character (c, d, z, l, [)
-  /status        - Show PTY status
+	  /get_screen    - Get current screen content
+	  /state         - Detect terminal state (heuristic)
+	  /transcript    - Show transcript file path
+	  /poll_output [timeout] - Wait up to timeout for new output (no input)
+	  /check_jobs    - Run 'jobs -l' in session
+	  /ctrl <key>    - Send control character (c, d, z, l, [)
+	  /status        - Show PTY status
 
 Input:
   Regular text (without /) is sent as a command with newline.
@@ -49,8 +49,9 @@ def send_control(pty, key):
 
     result = pty.type(char, timeout=2.0, quiescence_ms=300)
     print(f"Status: {result['status']}")
-    screen = pty.read()
-    state, reason = detect_state_heuristic(screen)
+    snap = pty.screen_snapshot()
+    screen = snap["screen"]
+    state, reason = detect_state_heuristic(screen, cursor_x=snap.get("cursor_x"))
     print(f"State: {state} ({reason})")
     print(f"Screen:\n{screen}")
 
@@ -65,8 +66,9 @@ def main():
     print("-" * 50)
 
     # Show initial screen
-    screen = pty.read()
-    state, reason = detect_state_heuristic(screen)
+    snap = pty.screen_snapshot()
+    screen = snap["screen"]
+    state, reason = detect_state_heuristic(screen, cursor_x=snap.get("cursor_x"))
     print(f"\nInitial state: {state} ({reason})")
     print(f"Screen:\n{screen}")
 
@@ -92,12 +94,14 @@ def main():
                 elif cmd == "/help":
                     show_help()
 
-                elif cmd == "/read":
-                    print(f"\nScreen:\n{pty.read()}")
+                elif cmd == "/get_screen":
+                    snap = pty.screen_snapshot()
+                    print(f"\nScreen:\n{snap['screen']}")
 
                 elif cmd == "/state":
-                    screen = pty.read()
-                    state, reason = detect_state_heuristic(screen)
+                    snap = pty.screen_snapshot()
+                    screen = snap["screen"]
+                    state, reason = detect_state_heuristic(screen, cursor_x=snap.get("cursor_x"))
                     print(f"\nState: {state}")
                     print(f"Reason: {reason}")
 
@@ -130,16 +134,18 @@ def main():
                 elif cmd == "/status":
                     print(f"\nAlive: {pty.alive}")
                     print(f"Transcript: {pty.transcript()}")
-                    screen = pty.read()
-                    state, reason = detect_state_heuristic(screen)
+                    snap = pty.screen_snapshot()
+                    screen = snap["screen"]
+                    state, reason = detect_state_heuristic(screen, cursor_x=snap.get("cursor_x"))
                     print(f"State: {state} ({reason})")
 
                 elif cmd == "/raw":
                     if args:
                         result = pty.type(args, timeout=30.0, quiescence_ms=500)
                         print(f"Status: {result['status']}")
-                        screen = pty.read()
-                        state, reason = detect_state_heuristic(screen)
+                        snap = pty.screen_snapshot()
+                        screen = snap["screen"]
+                        state, reason = detect_state_heuristic(screen, cursor_x=snap.get("cursor_x"))
                         print(f"State: {state} ({reason})")
                         print(f"Output:\n{result['output']}")
                     else:
@@ -156,8 +162,9 @@ def main():
             result = pty.type(command + "\n", timeout=30.0, quiescence_ms=500)
             print(f"Status: {result['status']}")
 
-            screen = pty.read()
-            state, reason = detect_state_heuristic(screen)
+            snap = pty.screen_snapshot()
+            screen = snap["screen"]
+            state, reason = detect_state_heuristic(screen, cursor_x=snap.get("cursor_x"))
             print(f"State: {state} ({reason})")
             print(f"Output:\n{result['output']}")
 

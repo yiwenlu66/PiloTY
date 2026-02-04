@@ -43,7 +43,7 @@ def list_sessions(show_all=False):
         print("  (none)")
         return
         
-    # Sort by name (which includes timestamp)
+    # Sort by name
     sessions.sort()
     
     for session_path in sessions:
@@ -114,12 +114,10 @@ def show_session_info(session_id):
             state = json.load(f)
             
         print("\nCurrent State:")
-        print(f"  Directory: {state.get('current_directory', 'unknown')}")
-        print(f"  Active handler: {state.get('active_handler', 'none')}")
-        if state.get('handler_context'):
-            print(f"  Handler context: {json.dumps(state['handler_context'], indent=4)}")
-        if state.get('background_jobs'):
-            print(f"  Background jobs: {len(state['background_jobs'])}")
+        print(f"  VT100 OK: {state.get('vt100_ok', 'unknown')}")
+        if state.get("vt100_error"):
+            print(f"  VT100 error: {state['vt100_error']}")
+        print(f"  Transcript: {state.get('transcript', 'unknown')}")
             
     # Show files
     print("\nLog Files:")

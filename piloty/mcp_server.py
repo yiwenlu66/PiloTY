@@ -1,30 +1,144 @@
 """MCP server interface for PiloTY.
 
-Quiescence-based PTY with LLM sampling for state interpretation.
+Contract (agent-facing):
+- `status` is a single processed state flag: one of `running`, `ready`, `repl`,
+  `password`, `confirm`, `editor`, `pager`, `unknown`, `eof`, `terminated`.
+- `prompt` is best-effort prompt classification: one of `shell`, `python`, `pdb`,
+  `none`, `unknown`.
+- `output` is the PTY stream consumed during this call (typically ANSI-stripped by
+  default via `strip_ansi=true`).
+- Use `get_screen()` / `get_scrollback()` for rendered views.
+
+State interpretation uses heuristics by default. If the MCP client advertises
+sampling capability, this server may use sampling to classify terminal state.
 """
 
-import signal
+import signal as signal_mod
 import sys
 import logging
 import os
 import asyncio
 import re
 import time
-from typing import Optional
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
 from mcp.types import SamplingMessage, TextContent
+from pydantic import ConfigDict
 
 from .core import PTY
 
 logger = logging.getLogger(__name__)
+
+QUIESCENCE_MS = int(os.getenv("PILOTY_QUIESCENCE_MS", "1000"))
+
+# FastMCP's generated argument models inherit from ArgModelBase. By default, extra
+# tool arguments are silently ignored by pydantic. Reject unknown keys to avoid
+# clients thinking unsupported parameters were applied.
+ArgModelBase.model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+ANSI_RE = re.compile(
+    r"(?:\x1b\[[0-?]*[ -/]*[@-~])|(?:\x1b\][^\x07]*(?:\x07|\x1b\\))",
+    re.MULTILINE,
+)
+
+ESC_RE = re.compile(
+    r"(?:\x1b[][()#][0-9A-Za-z])|(?:\x1b[=><])|(?:\x1b[78M])",
+    re.MULTILINE,
+)
+
+
+def _maybe_strip_ansi(text: str, *, strip_ansi: bool) -> str:
+    if not strip_ansi:
+        return text
+    s = ANSI_RE.sub("", text)
+    s = ESC_RE.sub("", s)
+    # Drop common control chars (BEL, etc) but keep newline, carriage return, tab.
+    s = "".join(ch for ch in s if ch in {"\n", "\r", "\t", "\b"} or (ord(ch) >= 0x20 and ord(ch) != 0x7F))
+
+    # Best-effort line normalization for carriage-return and backspace overstrike.
+    out_lines: list[str] = []
+    line: list[str] = []
+    cursor = 0
+
+    def flush_line(newline: bool):
+        nonlocal line, cursor
+        if newline or line:
+            out_lines.append("".join(line).rstrip())
+        line = []
+        cursor = 0
+
+    for ch in s:
+        if ch == "\n":
+            flush_line(newline=True)
+            continue
+        if ch == "\r":
+            cursor = 0
+            continue
+        if ch == "\b":
+            cursor = max(0, cursor - 1)
+            continue
+        if ch == "\t":
+            ch = " "
+
+        while len(line) <= cursor:
+            line.append(" ")
+        line[cursor] = ch
+        cursor += 1
+
+    if line:
+        flush_line(newline=False)
+    return "\n".join(out_lines).rstrip("\n")
+
+
+def _prompt_from_state(state: str, reason: str) -> str:
+    if state == "READY":
+        return "shell"
+    if state == "REPL":
+        r = (reason or "").lower()
+        if "pdb" in r or "ipdb" in r:
+            return "pdb"
+        if "python" in r or "ipython" in r:
+            return "python"
+        return "unknown"
+    if state in {"RUNNING", "PASSWORD", "CONFIRM", "EDITOR", "PAGER"}:
+        return "none"
+    if state == "UNKNOWN":
+        return "unknown"
+    return "unknown"
+
+
+def _status_from_state(*, terminated: bool, alive: bool, state: str) -> str:
+    if terminated:
+        return "terminated"
+    if not alive:
+        return "eof"
+    if state == "READY":
+        return "ready"
+    if state == "PASSWORD":
+        return "password"
+    if state == "CONFIRM":
+        return "confirm"
+    if state == "REPL":
+        return "repl"
+    if state == "EDITOR":
+        return "editor"
+    if state == "PAGER":
+        return "pager"
+    if state in {"UNKNOWN", "ERROR"}:
+        return "unknown"
+    if state == "RUNNING":
+        return "running"
+    return "unknown"
 
 
 def _configure_logging():
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-    log_path = os.getenv("PILOTY_LOG_PATH", "/tmp/piloty.log")
+    log_path = "/tmp/piloty.log"
     try:
         file_handler = logging.FileHandler(log_path)
         file_handler.setFormatter(formatter)
@@ -45,11 +159,16 @@ Screen content:
 {screen}
 ```
 
+Classification rules:
+- If a shell prompt / REPL prompt / editor / pager is visible (especially on the last line),
+  choose that state even if earlier lines contain errors (e.g., tracebacks).
+- Use ERROR only when the screen looks stuck in an error state with no interactive prompt visible.
+
 What is the terminal state? Answer with exactly one of:
 - READY: Shell prompt visible, waiting for command (e.g., $, #, >, PS1)
 - PASSWORD: Asking for password (e.g., "Password:", "Enter passphrase")
 - CONFIRM: Asking for confirmation (e.g., "[Y/n]", "Continue?", "Are you sure?")
-- REPL: Interactive interpreter prompt (e.g., ">>>", "In [1]:", "irb>", "mysql>")
+- REPL: Interactive interpreter prompt (e.g., ">>>", "In [1]:", "(Pdb)", "ipdb>", "irb>", "mysql>")
 - EDITOR: Text editor active (e.g., vim, nano, emacs)
 - PAGER: Pager active (e.g., less, more, man page)
 - RUNNING: Command still executing, no prompt visible
@@ -67,20 +186,20 @@ class SessionManager:
 
     def __init__(self):
         self.sessions: dict[str, PTY] = {}
-        self._passwords: dict[str, str] = {}  # session_id -> password (not logged)
         self._last_used: dict[str, float] = {}
-        self._max_sessions: int = int(os.getenv("PILOTY_MAX_SESSIONS", "32"))
+        self._max_sessions: int = 32
+        self._terminated: set[str] = set()
+        self._config: dict[str, dict] = {}
 
-    def get_session(self, session_id: str) -> PTY:
+    def get_session(self, session_id: str, *, cwd: str | None = None) -> PTY:
         """Get or create PTY session."""
+        if session_id in self._terminated:
+            raise RuntimeError("terminated")
+
         existing = self.sessions.get(session_id)
-        if existing is not None and not existing.alive:
-            try:
-                existing.terminate()
-            except Exception:
-                pass
-            self.sessions.pop(session_id, None)
-            self._last_used.pop(session_id, None)
+        if existing is not None:
+            self._last_used[session_id] = time.monotonic()
+            return existing
 
         if session_id not in self.sessions:
             if self._max_sessions > 0 and len(self.sessions) >= self._max_sessions:
@@ -92,28 +211,91 @@ class SessionManager:
                         pass
                     self.sessions.pop(oldest_id, None)
                     self._last_used.pop(oldest_id, None)
-            self.sessions[session_id] = PTY(session_id=session_id)
+            cfg = self._config.get(session_id, {})
+            self.sessions[session_id] = PTY(
+                session_id=session_id,
+                cwd=cwd,
+                prompt_regex=cfg.get("prompt_regex"),
+                tag=cfg.get("tag"),
+            )
         self._last_used[session_id] = time.monotonic()
         return self.sessions[session_id]
 
-    def set_password(self, session_id: str, password: str):
-        """Store password for session (not logged)."""
-        self._passwords[session_id] = password
+    def configure(self, session_id: str, *, tag: str | None = None, prompt_regex: str | None = None):
+        cfg = self._config.setdefault(session_id, {})
+        if tag is not None:
+            cfg["tag"] = tag
+        if prompt_regex is not None:
+            cfg["prompt_regex"] = prompt_regex
 
-    def get_password(self, session_id: str) -> Optional[str]:
-        """Get stored password for session."""
-        return self._passwords.get(session_id)
+        s = self.sessions.get(session_id)
+        if s is not None:
+            if tag is not None:
+                s.tag = tag
+            if prompt_regex is not None:
+                s.prompt_regex = prompt_regex
 
-    def clear_password(self, session_id: str):
-        """Clear stored password."""
-        self._passwords.pop(session_id, None)
+    def configure_full(
+        self,
+        session_id: str,
+        *,
+        tag: str | None = None,
+        prompt_regex: str | None = None,
+    ):
+        if session_id in self._terminated:
+            raise RuntimeError("terminated")
+
+        cfg = self._config.setdefault(session_id, {})
+        if tag is not None:
+            cfg["tag"] = tag
+        if prompt_regex is not None:
+            cfg["prompt_regex"] = prompt_regex
+
+        s = self.sessions.get(session_id)
+        if s is not None:
+            if tag is not None:
+                s.tag = tag
+            if prompt_regex is not None:
+                s.prompt_regex = prompt_regex
+
+    def list_sessions(self) -> list[dict]:
+        ids = set(self.sessions.keys()) | set(self._terminated) | set(self._config.keys())
+        out: list[dict] = []
+        for session_id in sorted(ids):
+            terminated = session_id in self._terminated
+            s = self.sessions.get(session_id)
+            meta = None
+            alive = False
+            if s is not None:
+                alive = bool(s.alive)
+                try:
+                    meta = s.metadata()
+                except Exception:
+                    meta = None
+            out.append(
+                {
+                    "session_id": session_id,
+                    "terminated": terminated,
+                    "alive": alive,
+                    "tag": (meta or {}).get("tag"),
+                    "cwd": (meta or {}).get("cwd"),
+                    "pid": (meta or {}).get("pid"),
+                    "prompt_regex": (meta or {}).get("prompt_regex"),
+                    "rows": (meta or {}).get("rows"),
+                    "cols": (meta or {}).get("cols"),
+                    "started_at": (meta or {}).get("started_at"),
+                    "last_activity_at": (meta or {}).get("last_activity_at"),
+                }
+            )
+        return out
 
     def terminate_all(self):
         """Terminate all sessions."""
-        for session in self.sessions.values():
+        for session_id, session in list(self.sessions.items()):
             session.terminate()
-        self.sessions.clear()
-        self._passwords.clear()
+            self.sessions.pop(session_id, None)
+            self._last_used.pop(session_id, None)
+            self._terminated.add(session_id)
 
 
 # Initialize MCP server
@@ -161,7 +343,59 @@ async def interpret_terminal_state(
         return "UNKNOWN", str(e)
 
 
-def detect_state_heuristic(screen: str) -> tuple[str, str]:
+async def determine_terminal_state(
+    ctx: Context | None,
+    screen: str,
+    cursor_x: int | None = None,
+    prompt_regex: str | None = None,
+) -> tuple[str, str]:
+    """Determine terminal state using sampling when available, else heuristics.
+
+    If sampling is requested but fails or yields UNKNOWN, fall back to heuristics
+    and include the sampling reason in the returned reason for troubleshooting.
+    """
+    heuristic_state, heuristic_reason = detect_state_heuristic(
+        screen,
+        cursor_x=cursor_x,
+        prompt_regex=prompt_regex,
+    )
+    if ctx and getattr(ctx, "session", None):
+        # Client sampling is optional in MCP. Some clients provide a session object
+        # but do not advertise sampling capability, in which case create_message()
+        # will fail with "sampling/createMessage". Treat that as "no sampling"
+        # and rely on local heuristics instead.
+        client_params = getattr(ctx.session, "client_params", None)
+        caps = getattr(client_params, "capabilities", None) if client_params else None
+        sampling_caps = getattr(caps, "sampling", None) if caps else None
+        if sampling_caps is None:
+            return heuristic_state, heuristic_reason
+
+        # Heuristic-first. Sampling is used only to refine RUNNING into a more
+        # specific interactive state. This prevents sampling from incorrectly
+        # reporting READY when the screen shows a running command line.
+        if heuristic_state != "RUNNING":
+            return heuristic_state, heuristic_reason
+
+        sampled_state, sampled_reason = await interpret_terminal_state(ctx, screen)
+        if sampled_state in {"PASSWORD", "CONFIRM", "REPL", "EDITOR", "PAGER"}:
+            return sampled_state, sampled_reason
+
+        if sampled_state == "UNKNOWN":
+            return (
+                heuristic_state,
+                f"sampling=UNKNOWN ({sampled_reason}); heuristic={heuristic_state} ({heuristic_reason})",
+            )
+        return heuristic_state, f"sampling={sampled_state} ({sampled_reason}); heuristic={heuristic_reason}"
+
+    return heuristic_state, heuristic_reason
+
+
+def detect_state_heuristic(
+    screen: str,
+    *,
+    cursor_x: int | None = None,
+    prompt_regex: str | None = None,
+) -> tuple[str, str]:
     """Fast heuristic state detection (no LLM).
 
     Used as fallback when sampling unavailable.
@@ -170,13 +404,88 @@ def detect_state_heuristic(screen: str) -> tuple[str, str]:
     if not lines:
         return "UNKNOWN", "empty screen"
 
-    last_line = lines[-1] if lines else ""
-    last_line_lower = last_line.lower()
-    last_line_stripped = last_line.rstrip()  # Keep leading spaces, strip trailing
-    screen_lower = screen.lower()
+    # Heuristics should not get "stuck" on scrollback text. Prefer signals near the
+    # bottom of the visible screen.
+    window = lines[-12:]
+    window_lower = "\n".join(window).lower()
+    tail_nonempty = [ln.rstrip() for ln in window if ln.strip()]
+    tail_last = tail_nonempty[-1] if tail_nonempty else lines[-1].rstrip()
 
-    # Password prompts (check early - high priority)
-    # Match various password prompt formats
+    # REPL prompts - check exact patterns
+    # Use tail window to preserve case and spacing.
+    repl_patterns = [
+        (">>> ", "python"),
+        (">>>", "python"),  # Also match without trailing space
+        ("... ", "python continuation"),
+        ("in [", "ipython"),
+        ("out[", "ipython output"),
+        ("(pdb)", "pdb"),
+        ("ipdb>", "ipdb"),
+        ("irb(", "ruby"),
+        ("pry(", "pry"),
+        ("mysql>", "mysql"),
+        ("postgres=#", "psql"),
+        ("postgres=>", "psql"),
+        ("sqlite>", "sqlite"),
+    ]
+    for prompt, name in repl_patterns:
+        if (cursor_x is None or cursor_x > 0) and (prompt in tail_last or prompt in tail_last.lower()):
+            return "REPL", f"{name} prompt"
+
+    # Editor detection (vim, nano)
+    if "-- insert --" in window_lower or "-- normal --" in window_lower:
+        return "EDITOR", "vim mode indicator"
+    if "gnu nano" in window_lower or "^g get help" in window_lower:
+        return "EDITOR", "nano indicators"
+
+    # Pager detection
+    tail_last_lower = tail_last.lower()
+    if tail_last == ":" or "(end)" in tail_last_lower or "manual page" in window_lower:
+        return "PAGER", "pager indicators"
+
+    # Configurable prompt detection (shell).
+    if prompt_regex:
+        try:
+            m = re.search(prompt_regex, tail_last)
+        except re.error:
+            m = None
+        if m:
+            if cursor_x is not None and cursor_x == 0:
+                return "RUNNING", "cursor at column 0"
+            return "READY", f"prompt_regex matched: {m.group(0)!r}"
+
+    # Shell prompts - must look like actual prompts, not progress bars
+    # Require typical prompt structure: ends with $ # or > but not inside brackets
+    shell_ends = ["$", "#"]
+    tail_last_stripped = tail_last.rstrip()
+    for end in shell_ends:
+        if tail_last_stripped.endswith(end):
+            if "%" in tail_last_stripped or ("[" in tail_last_stripped and "]" in tail_last_stripped):
+                break
+            if cursor_x is not None and cursor_x == 0:
+                return "RUNNING", "cursor at column 0"
+            return "READY", f"shell prompt '{end}'"
+
+    # Special case: bare > prompt (but not inside progress bars or with percentages)
+    if tail_last_stripped.endswith(">"):
+        if "%" not in tail_last_stripped and "[" not in tail_last_stripped:
+            if len(tail_last_stripped) < 50:
+                if cursor_x is not None and cursor_x == 0:
+                    return "RUNNING", "cursor at column 0"
+                return "READY", "generic prompt"
+
+    # zsh prompt: ends with %
+    if tail_last_stripped.endswith("%"):
+        if not tail_last_stripped[-2:-1].isdigit():
+            if cursor_x is not None and cursor_x == 0:
+                return "RUNNING", "cursor at column 0"
+            return "READY", "zsh prompt"
+
+    # Password / confirmation prompts (only if no interactive prompt detected).
+    # Password prompts: only consider the last few visible lines to avoid stale
+    # "Password:" text in scrollback overriding the current state.
+    pw_recent = tail_nonempty[-3:] if tail_nonempty else [tail_last]
+    pw_recent_lower = "\n".join(ln.lower() for ln in pw_recent)
     password_patterns = [
         "password:",
         "password for",
@@ -184,91 +493,86 @@ def detect_state_heuristic(screen: str) -> tuple[str, str]:
         "passphrase for",
         "enter password",
         "enter passphrase",
+        "[sudo]",
         "secret:",
-        "[sudo]",  # sudo password prompt often contains this
     ]
     for pattern in password_patterns:
-        if pattern in screen_lower and ("password" in screen_lower or "passphrase" in screen_lower):
-            return "PASSWORD", f"password prompt detected"
-    # Direct password keyword check
-    if screen_lower.rstrip().endswith(("password:", "passphrase:", "password: ", "passphrase: ")):
-        return "PASSWORD", "ends with password prompt"
+        if pattern in pw_recent_lower:
+            return "PASSWORD", "password prompt detected"
 
-    # Confirmation prompts
+    # Confirmation prompts: also only consider the last few visible lines.
     confirm_indicators = ["[y/n]", "[yes/no]", "continue?", "are you sure", "proceed?"]
     for indicator in confirm_indicators:
-        if indicator in screen_lower:
+        if indicator in pw_recent_lower:
             return "CONFIRM", f"found '{indicator}'"
 
-    # Error detection (check before REPL since traceback contains "...")
-    error_indicators = ["error:", "failed:", "fatal:", "exception:", "traceback"]
+    # Error detection (very low priority): only consider the last few visible lines.
+    # This prevents stale scrollback exceptions from overriding the current state.
+    if cursor_x is not None and cursor_x == 0:
+        return "RUNNING", "cursor at column 0"
+
+    recent = [ln.lower() for ln in tail_nonempty[-3:]] if tail_nonempty else [tail_last.lower()]
+    recent_join = "\n".join(recent)
+    error_indicators = ["error:", "failed:", "fatal:", "exception:", "traceback", "indexerror", "keyerror"]
     for indicator in error_indicators:
-        if indicator in screen_lower:
+        if indicator in recent_join:
             return "ERROR", f"found '{indicator}'"
 
-    # REPL prompts - check exact patterns
-    # Use original last_line to preserve case and spacing
-    repl_patterns = [
-        (">>> ", "python"),
-        (">>>", "python"),  # Also match without trailing space
-        ("... ", "python continuation"),
-        ("...", "python continuation"),  # Match without trailing space
-        ("in [", "ipython"),
-        ("out[", "ipython output"),
-        ("irb(", "ruby"),
-        ("pry(", "pry"),
-        ("mysql>", "mysql"),
-        ("postgres", "postgres"),
-        ("sqlite>", "sqlite"),
-    ]
-    for prompt, name in repl_patterns:
-        if prompt in last_line or prompt in last_line_lower:
-            return "REPL", f"{name} prompt"
-
-    # Editor detection (vim, nano)
-    if "-- insert --" in screen_lower or "-- normal --" in screen_lower:
-        return "EDITOR", "vim mode indicator"
-    if "gnu nano" in screen_lower or "^g get help" in screen_lower:
-        return "EDITOR", "nano indicators"
-
-    # Pager detection
-    if last_line_stripped == ":" or "(end)" in last_line_lower or "manual page" in screen_lower:
-        return "PAGER", "pager indicators"
-
-    # Shell prompts - must look like actual prompts, not progress bars
-    # Require typical prompt structure: ends with $ # or > but not inside brackets
-    shell_ends = ["$", "#"]
-    for end in shell_ends:
-        if last_line_stripped.endswith(end):
-            # Exclude if it looks like a progress bar or percentage
-            if "%" in last_line_stripped or "[" in last_line_stripped and "]" in last_line_stripped:
-                continue
-            # Likely a shell prompt
-            return "READY", f"shell prompt '{end}'"
-        # Also check with trailing space
-        if last_line.rstrip().endswith(end + " ") or last_line.endswith(end + " "):
-            return "READY", f"shell prompt '{end}'"
-
-    # Check for common prompt formats: user@host:path$ or bash-5.3$
-    if "@" in last_line_stripped and ("$" in last_line_stripped or "#" in last_line_stripped):
-        return "READY", "user@host prompt"
-    if last_line_stripped.startswith("bash") and "$" in last_line_stripped:
-        return "READY", "bash prompt"
-
-    # Special case: bare > prompt (but not inside progress bars or with percentages)
-    if last_line_stripped.endswith(">"):
-        # Exclude progress bars and percentages
-        if "%" not in last_line_stripped and "[" not in last_line_stripped:
-            if len(last_line_stripped) < 50:  # Prompts are usually short
-                return "READY", "generic prompt"
-
-    # zsh prompt: ends with %
-    if last_line_stripped.endswith("%") or last_line.rstrip().endswith("% "):
-        # Exclude percentages in progress bars (e.g., "50%")
-        if not last_line_stripped[-2:-1].isdigit():
-            return "READY", "zsh prompt"
-
     return "RUNNING", "no prompt detected"
+
+
+def _file_uri_to_path(uri: str) -> str | None:
+    if not uri:
+        return None
+    uri = str(uri)
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return None
+    return unquote(parsed.path)
+
+
+def _session_log_dir_exists(session_id: str) -> bool:
+    base = os.path.join(str(Path.home()), ".piloty", "sessions")
+    if os.path.isdir(os.path.join(base, session_id)):
+        return True
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id).strip("._-") or "default"
+    return os.path.isdir(os.path.join(base, safe))
+
+
+def _session_transcript_path_if_exists(session_id: str) -> str | None:
+    base = os.path.join(str(Path.home()), ".piloty", "sessions")
+    direct = os.path.join(base, session_id, "transcript.log")
+    if os.path.isfile(direct):
+        return direct
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id).strip("._-") or "default"
+    safe_path = os.path.join(base, safe, "transcript.log")
+    if os.path.isfile(safe_path):
+        return safe_path
+    return None
+
+
+async def _initial_cwd_from_ctx(ctx: Context | None) -> str | None:
+    if not ctx or not getattr(ctx, "session", None):
+        return None
+
+    client_params = getattr(ctx.session, "client_params", None)
+    caps = getattr(client_params, "capabilities", None) if client_params else None
+    roots_caps = getattr(caps, "roots", None) if caps else None
+    if roots_caps is None:
+        return None
+
+    try:
+        roots_result = await ctx.session.list_roots()
+    except Exception:
+        return None
+
+    roots = getattr(roots_result, "roots", None) or []
+    for root in roots:
+        uri = getattr(root, "uri", None)
+        path = _file_uri_to_path(uri)
+        if path and os.path.isdir(path):
+            return path
+    return None
 
 
 @mcp.tool()
@@ -276,75 +580,59 @@ async def run(
     session_id: str,
     command: str,
     timeout: float = 30.0,
+    strip_ansi: bool = True,
     ctx: Context | None = None,
 ) -> dict:
     """Execute a command in a stateful PTY session.
 
-    This is a stateful terminal: the PTY persists across calls per `session_id`.
-    If you start an interactive program (ssh, python, pdb, vim, tmux), the PTY
-    stays inside it until you exit or the program ends.
+    Quiescence: reads until the PTY is silent for PILOTY_QUIESCENCE_MS (default 1000ms),
+    or until `timeout` seconds elapse.
 
-    Return timing: waits until output has been silent for ~500ms (quiescence) or
-    until `timeout` seconds elapse. Quiescence is not equivalent to "process
-    completed" for programs that are silent while still running or waiting.
-
-    Args:
-        session_id: Session identifier. Reuse the same ID to keep context.
-        command: Command to execute (newline added automatically).
-        timeout: Maximum wait time in seconds
-
-    Returns:
-        {
-            "status": "ready" | "password" | "confirm" | "repl" | "editor" | "pager" | "error" | "timeout",
-            "output": str,
-            "screen": str,
-            "state_reason": str
-        }
+    Common SSH pattern:
+    - run(session_id, "ssh host", timeout=...)
+    - expect_prompt(session_id, timeout=...)  # wait for remote shell prompt
     """
-    session = session_manager.get_session(session_id)
+    cwd = None
+    if session_id not in session_manager.sessions:
+        cwd = await _initial_cwd_from_ctx(ctx)
+    try:
+        session = session_manager.get_session(session_id, cwd=cwd)
+    except RuntimeError:
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
 
     # Send command with newline
-    result = await asyncio.to_thread(session.type, command + "\n", timeout=timeout, quiescence_ms=500)
+    result = await asyncio.to_thread(session.type, command + "\n", timeout=timeout, quiescence_ms=QUIESCENCE_MS)
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
 
-    # Get rendered screen
-    screen = await asyncio.to_thread(session.read)
-
-    # Interpret state
-    if ctx and ctx.session:
-        state, reason = await interpret_terminal_state(ctx, screen)
-    else:
-        state, reason = detect_state_heuristic(screen)
-
-    # Map state to status
-    status_map = {
-        "READY": "ready",
-        "PASSWORD": "password",
-        "CONFIRM": "confirm",
-        "REPL": "repl",
-        "EDITOR": "editor",
-        "PAGER": "pager",
-        "ERROR": "error",
-        "RUNNING": "running",
-        "UNKNOWN": "running",
-    }
-    status = status_map.get(state, "running")
-
-    # Handle timeout
-    if result["status"] == "timeout":
-        status = "timeout"
-    if result["status"] == "eof":
-        status = "error"
-        reason = (reason + " " if reason else "") + "pty eof"
-    if result["status"] == "error":
-        status = "error"
-        reason = (reason + " " if reason else "") + str(result.get("error", "pty error"))
-
-    return {
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    output = _maybe_strip_ansi(result.get("output", ""), strip_ansi=strip_ansi)
+    resp = {
         "status": status,
-        "output": result["output"],
-        "screen": screen,
+        "prompt": prompt,
+        "output": output,
+        "timed_out": result["status"] == "timeout",
+        "output_truncated": bool(result.get("output_truncated", False)),
+        "dropped_bytes": int(result.get("dropped_bytes", 0)),
         "state_reason": reason,
     }
+    if result["status"] in {"error", "eof"}:
+        resp["error"] = str(result.get("error", "pty eof"))
+    return resp
 
 
 @mcp.tool()
@@ -352,62 +640,50 @@ async def send_input(
     session_id: str,
     text: str,
     timeout: float = 30.0,
+    strip_ansi: bool = True,
     ctx: Context | None = None,
 ) -> dict:
-    """Send raw input to a stateful terminal session (no newline added).
+    """Send raw input to a stateful terminal session (no newline added)."""
+    cwd = None
+    if session_id not in session_manager.sessions:
+        cwd = await _initial_cwd_from_ctx(ctx)
+    try:
+        session = session_manager.get_session(session_id, cwd=cwd)
+    except RuntimeError:
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
 
-    Use for:
-    - Answering confirmation prompts (y/n)
-    - Sending text to REPL
-    - Navigating TUI programs
-    - Any input that doesn't need a newline automatically added
+    result = await asyncio.to_thread(session.type, text, timeout=timeout, quiescence_ms=QUIESCENCE_MS)
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
 
-    Args:
-        session_id: Session identifier. Reuse the same ID to keep context.
-        text: Text to send (exactly as provided, no newline added)
-        timeout: Maximum wait time
-
-    Returns:
-        Same as run() - status, output, screen, state_reason
-    """
-    session = session_manager.get_session(session_id)
-
-    result = await asyncio.to_thread(session.type, text, timeout=timeout, quiescence_ms=500)
-    screen = await asyncio.to_thread(session.read)
-
-    if ctx and ctx.session:
-        state, reason = await interpret_terminal_state(ctx, screen)
-    else:
-        state, reason = detect_state_heuristic(screen)
-
-    status_map = {
-        "READY": "ready",
-        "PASSWORD": "password",
-        "CONFIRM": "confirm",
-        "REPL": "repl",
-        "EDITOR": "editor",
-        "PAGER": "pager",
-        "ERROR": "error",
-        "RUNNING": "running",
-        "UNKNOWN": "running",
-    }
-    status = status_map.get(state, "running")
-
-    if result["status"] == "timeout":
-        status = "timeout"
-    if result["status"] == "eof":
-        status = "error"
-        reason = (reason + " " if reason else "") + "pty eof"
-    if result["status"] == "error":
-        status = "error"
-        reason = (reason + " " if reason else "") + str(result.get("error", "pty error"))
-
-    return {
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    output = _maybe_strip_ansi(result.get("output", ""), strip_ansi=strip_ansi)
+    resp = {
         "status": status,
-        "output": result["output"],
-        "screen": screen,
+        "prompt": prompt,
+        "output": output,
+        "timed_out": result["status"] == "timeout",
+        "output_truncated": bool(result.get("output_truncated", False)),
+        "dropped_bytes": int(result.get("dropped_bytes", 0)),
         "state_reason": reason,
     }
+    if result["status"] in {"error", "eof"}:
+        resp["error"] = str(result.get("error", "pty eof"))
+    return resp
 
 
 @mcp.tool()
@@ -417,72 +693,69 @@ async def send_password(
     timeout: float = 30.0,
     ctx: Context | None = None,
 ) -> dict:
-    """Send a password to the terminal (best-effort redaction).
+    """Send a password plus newline.
 
-    The password is sent with a newline. Transcript logging is disabled for the
-    duration of this call, but screen rendering may still show echoed text if
-    the remote program echoes input.
-
-    Args:
-        session_id: Session identifier. Reuse the same ID to keep context.
-        password: Password to send (will add newline)
-        timeout: Maximum wait time
-
-    Returns:
-        Same as run() - status, output, screen, state_reason
+    Security model:
+    - Forces terminal echo off for this send operation (`echo=False`).
+    - Disables transcript logging for this send operation (`log=False`).
+    - Returns `output` as the literal string "[password sent]".
     """
-    session = session_manager.get_session(session_id)
-
+    cwd = None
+    if session_id not in session_manager.sessions:
+        cwd = await _initial_cwd_from_ctx(ctx)
     try:
-        result = await asyncio.to_thread(
-            session.type,
-            password + "\n",
-            timeout=timeout,
-            quiescence_ms=500,
-            log=False,
-        )
-    except TypeError:
-        # Back-compat if PTY.type() does not accept log= yet.
-        result = await asyncio.to_thread(session.type, password + "\n", timeout=timeout, quiescence_ms=500)
+        session = session_manager.get_session(session_id, cwd=cwd)
+    except RuntimeError:
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
 
-    try:
-        screen = await asyncio.to_thread(session.read, log=False)
-    except TypeError:
-        screen = await asyncio.to_thread(session.read)
+    result = await asyncio.to_thread(
+        session.type,
+        password + "\n",
+        timeout=timeout,
+        quiescence_ms=QUIESCENCE_MS,
+        log=False,
+        echo=False,
+    )
 
-    if ctx and ctx.session:
-        state, reason = await interpret_terminal_state(ctx, screen)
+    snap = await asyncio.to_thread(session.screen_snapshot, log=False, drain=False)
+
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    post = _maybe_strip_ansi(result.get("output", ""), strip_ansi=True)
+    # Best-effort redact: some programs may still echo input even when echo is
+    # disabled, or may include the password in error messages.
+    redacted = post.replace(password, "[redacted]") if password else post
+    if redacted.strip():
+        out = "[password sent]\n" + redacted
     else:
-        state, reason = detect_state_heuristic(screen)
-
-    status_map = {
-        "READY": "ready",
-        "PASSWORD": "password",
-        "CONFIRM": "confirm",
-        "REPL": "repl",
-        "EDITOR": "editor",
-        "PAGER": "pager",
-        "ERROR": "error",
-        "RUNNING": "running",
-        "UNKNOWN": "running",
-    }
-    status = status_map.get(state, "running")
-
-    if result["status"] == "timeout":
-        status = "timeout"
-    if result["status"] == "eof":
-        status = "error"
-        reason = (reason + " " if reason else "") + "pty eof"
-    if result["status"] == "error":
-        status = "error"
-        reason = (reason + " " if reason else "") + str(result.get("error", "pty error"))
-
-    return {
+        out = "[password sent]"
+    resp = {
         "status": status,
-        "output": "[password sent]",  # Don't return actual output which might echo
-        "screen": screen,
+        "prompt": prompt,
+        "output": out,
+        "timed_out": result["status"] == "timeout",
+        "output_truncated": bool(result.get("output_truncated", False)),
+        "dropped_bytes": int(result.get("dropped_bytes", 0)),
         "state_reason": reason,
     }
+    if result["status"] in {"error", "eof"}:
+        resp["error"] = str(result.get("error", "pty eof"))
+    return resp
 
 
 @mcp.tool()
@@ -490,20 +763,35 @@ async def send_control(
     session_id: str,
     key: str,
     timeout: float = 5.0,
+    strip_ansi: bool = True,
     ctx: Context | None = None,
 ) -> dict:
-    """Send a control character to the terminal (Ctrl+key).
+    """Send a control character to the terminal.
 
-    Args:
-        session_id: Session identifier. Reuse the same ID to keep context.
-        key: Control key - one of: c (^C), d (^D), z (^Z), l (^L clear),
-             [ (escape), or any letter for Ctrl+letter
-        timeout: Maximum wait time
+    Keys:
+    - `c` sends Ctrl+C, commonly used to interrupt.
+    - `d` sends Ctrl+D (EOF in many programs).
+    - `z` sends Ctrl+Z (job control suspend).
+    - `l` sends Ctrl+L (clear screen in many shells).
+    - `[` or `escape` sends ESC.
 
-    Returns:
-        Same as run() - status, output, screen, state_reason
+    Returns the same shape as `run()`.
     """
-    session = session_manager.get_session(session_id)
+    cwd = None
+    if session_id not in session_manager.sessions:
+        cwd = await _initial_cwd_from_ctx(ctx)
+    try:
+        session = session_manager.get_session(session_id, cwd=cwd)
+    except RuntimeError:
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
 
     # Map key to control character
     key = key.lower()
@@ -512,154 +800,538 @@ async def send_control(
     elif len(key) == 1 and key.isalpha():
         char = chr(ord(key) - ord("a") + 1)  # Ctrl+letter
     else:
-        return {"status": "error", "output": f"Unknown control key: {key}", "screen": "", "state_reason": ""}
+        raise ValueError(f"Unknown control key: {key}")
 
-    result = await asyncio.to_thread(session.type, char, timeout=timeout, quiescence_ms=300)
-    screen = await asyncio.to_thread(session.read)
+    result = await asyncio.to_thread(session.type, char, timeout=timeout, quiescence_ms=QUIESCENCE_MS)
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
 
-    if ctx and ctx.session:
-        state, reason = await interpret_terminal_state(ctx, screen)
-    else:
-        state, reason = detect_state_heuristic(screen)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
 
-    status_map = {
-        "READY": "ready",
-        "PASSWORD": "password",
-        "CONFIRM": "confirm",
-        "REPL": "repl",
-        "EDITOR": "editor",
-        "PAGER": "pager",
-        "ERROR": "error",
-        "RUNNING": "running",
-        "UNKNOWN": "running",
-    }
-    status = status_map.get(state, "running")
-    if result["status"] == "timeout":
-        status = "timeout"
-    if result["status"] == "eof":
-        status = "error"
-        reason = (reason + " " if reason else "") + "pty eof"
-    if result["status"] == "error":
-        status = "error"
-        reason = (reason + " " if reason else "") + str(result.get("error", "pty error"))
-
-    return {
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    output = _maybe_strip_ansi(result.get("output", ""), strip_ansi=strip_ansi)
+    resp = {
         "status": status,
-        "output": result["output"],
-        "screen": screen,
+        "prompt": prompt,
+        "output": output,
+        "timed_out": result["status"] == "timeout",
+        "output_truncated": bool(result.get("output_truncated", False)),
+        "dropped_bytes": int(result.get("dropped_bytes", 0)),
         "state_reason": reason,
     }
+    if result["status"] in {"error", "eof"}:
+        resp["error"] = str(result.get("error", "pty eof"))
+    return resp
 
 
 @mcp.tool()
 async def poll_output(
     session_id: str,
     timeout: float = 0.1,
+    strip_ansi: bool = True,
     ctx: Context | None = None,
 ) -> dict:
-    """Poll for pending output without sending input.
+    """Wait for new output without sending input.
 
-    Intended for long-running commands and background jobs where output arrives
-    asynchronously. This does not attempt to force output (no flush keystrokes);
-    it only drains whatever the PTY produces.
+    Quiescence: returns immediately once any output is observed and the PTY is
+    silent for PILOTY_QUIESCENCE_MS (default 1000ms). Returns empty output only
+    when `timeout` elapses without any output.
 
-    Args:
-        session_id: Stateful session identifier. Reuse the same ID to keep context.
-        timeout: Maximum poll time in seconds.
-
-    Returns:
-        Same structure as run(): status, output, screen, state_reason.
+    If you need to wait for a shell prompt (e.g., after SSH), use expect_prompt().
     """
-    session = session_manager.get_session(session_id)
+    cwd = None
+    if session_id not in session_manager.sessions:
+        cwd = await _initial_cwd_from_ctx(ctx)
+    try:
+        session = session_manager.get_session(session_id, cwd=cwd)
+    except RuntimeError:
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
 
-    result = await asyncio.to_thread(session.poll_output, timeout=timeout, quiescence_ms=100)
-    screen = await asyncio.to_thread(session.read)
+    result = await asyncio.to_thread(
+        session.poll_output,
+        timeout=timeout,
+        quiescence_ms=QUIESCENCE_MS,
+    )
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
 
-    if ctx and ctx.session:
-        state, reason = await interpret_terminal_state(ctx, screen)
-    else:
-        state, reason = detect_state_heuristic(screen)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
 
-    status_map = {
-        "READY": "ready",
-        "PASSWORD": "password",
-        "CONFIRM": "confirm",
-        "REPL": "repl",
-        "EDITOR": "editor",
-        "PAGER": "pager",
-        "ERROR": "error",
-        "RUNNING": "running",
-        "UNKNOWN": "running",
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    output = _maybe_strip_ansi(result.get("output", ""), strip_ansi=strip_ansi)
+    resp = {
+        "status": status,
+        "prompt": prompt,
+        "output": output,
+        "timed_out": result["status"] == "timeout",
+        "output_truncated": bool(result.get("output_truncated", False)),
+        "dropped_bytes": int(result.get("dropped_bytes", 0)),
+        "state_reason": reason,
     }
-    status = status_map.get(state, "running")
+    if result["status"] in {"error", "eof"}:
+        resp["error"] = str(result.get("error", "pty eof"))
+    return resp
 
-    if result["status"] == "timeout":
-        status = "timeout"
-    if result["status"] == "eof":
-        status = "error"
-        reason = (reason + " " if reason else "") + "pty eof"
-    if result["status"] == "error":
-        status = "error"
-        reason = (reason + " " if reason else "") + str(result.get("error", "pty error"))
 
+@mcp.tool()
+async def get_screen(session_id: str, ctx: Context | None = None) -> dict:
+    """Get the current VT100-rendered terminal screen snapshot."""
+    if session_id not in session_manager.sessions:
+        hint = "no such session_id"
+        if _session_log_dir_exists(session_id):
+            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "screen": "",
+            "cursor_x": None,
+            "cursor_y": None,
+            "vt100_ok": None,
+            "rows": None,
+            "cols": None,
+            "state_reason": hint,
+        }
+    session = session_manager.sessions[session_id]
+
+    # Do not drain the PTY here. Output ingestion happens via run/send_*/poll_output/expect.
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
     return {
         "status": status,
-        "output": result["output"],
-        "screen": screen,
+        "prompt": prompt,
+        "screen": snap["screen"],
+        "cursor_x": snap.get("cursor_x"),
+        "cursor_y": snap.get("cursor_y"),
+        "vt100_ok": snap.get("vt100_ok"),
+        "rows": snap.get("rows"),
+        "cols": snap.get("cols"),
         "state_reason": reason,
     }
 
 
 @mcp.tool()
-async def read(session_id: str) -> str:
-    """Get current terminal screen content.
+async def get_scrollback(session_id: str, lines: int = 200, ctx: Context | None = None) -> dict:
+    if session_id not in session_manager.sessions:
+        hint = "no such session_id"
+        if _session_log_dir_exists(session_id):
+            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "scrollback": "",
+            "rows": None,
+            "cols": None,
+            "state_reason": hint,
+        }
+    session = session_manager.sessions[session_id]
 
-    Returns VT100-rendered screen (24x80 by default).
-    Escape sequences are processed, giving clean text output.
-
-    Args:
-        session_id: Session identifier
-
-    Returns:
-        Current screen content as text
-    """
-    session = session_manager.get_session(session_id)
-    return await asyncio.to_thread(session.read)
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    # Do not drain the PTY here. Output ingestion happens via run/send_*/poll_output/expect.
+    sb = await asyncio.to_thread(session.get_scrollback, lines, drain=False)
+    return {
+        "status": status,
+        "prompt": prompt,
+        "scrollback": sb,
+        "rows": snap.get("rows"),
+        "cols": snap.get("cols"),
+        "state_reason": reason,
+    }
 
 
 @mcp.tool()
-def transcript(session_id: str) -> str:
-    """Get path to transcript file.
+async def clear_scrollback(session_id: str, ctx: Context | None = None) -> dict:
+    if session_id not in session_manager.sessions:
+        hint = "no such session_id"
+        if _session_log_dir_exists(session_id):
+            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
+        return {"status": "unknown", "prompt": "unknown", "state_reason": hint}
+    session = session_manager.sessions[session_id]
 
-    Transcript contains full session output (not truncated).
-    Use for searching through history or reviewing full output.
-
-    Args:
-        session_id: Session identifier
-
-    Returns:
-        Absolute path to transcript file
-    """
-    session = session_manager.get_session(session_id)
-    return session.transcript()
+    await asyncio.to_thread(session.clear_scrollback)
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    return {"status": status, "prompt": prompt, "state_reason": reason}
 
 
 @mcp.tool()
-async def terminate(session_id: str) -> str:
-    """Terminate a PTY session.
+async def expect(
+    session_id: str,
+    pattern: str,
+    timeout: float = 30.0,
+    strip_ansi: bool = True,
+    ctx: Context | None = None,
+) -> dict:
+    cwd = None
+    if session_id not in session_manager.sessions:
+        cwd = await _initial_cwd_from_ctx(ctx)
+    try:
+        session = session_manager.get_session(session_id, cwd=cwd)
+    except RuntimeError:
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "matched": False,
+            "match": None,
+            "groups": [],
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
 
-    Args:
-        session_id: Session identifier
+    # If the pattern is already visible in the current rendered text, return
+    # immediately. This matches common agent usage ("wait until prompt appears"),
+    # where the prompt may already be present by the time expect() is called.
+    try:
+        rx = re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"re.error: {e}")
+    visible = await asyncio.to_thread(session.get_scrollback, 5000, log=False, drain=False)
+    m0 = rx.search(visible)
+    if m0:
+        snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+        state, reason = await determine_terminal_state(
+            ctx,
+            snap["screen"],
+            cursor_x=snap.get("cursor_x"),
+            prompt_regex=getattr(session, "prompt_regex", None),
+        )
+        prompt = _prompt_from_state(state, reason)
+        status = _status_from_state(terminated=False, alive=session.alive, state=state)
+        return {
+            "status": status,
+            "prompt": prompt,
+            "output": "",
+            "matched": True,
+            "match": m0.group(0),
+            "groups": list(m0.groups()),
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": f"matched on rendered text: {reason}",
+        }
 
-    Returns:
-        Confirmation message
+    result = await asyncio.to_thread(session.expect, pattern, timeout)
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    prompt = _prompt_from_state(state, reason)
+
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+
+    out = _maybe_strip_ansi(result.get("output", ""), strip_ansi=strip_ansi)
+    resp = {
+        "status": status,
+        "prompt": prompt,
+        "output": out,
+        "matched": result.get("status") == "matched",
+        "match": result.get("match"),
+        "groups": result.get("groups", []),
+        "timed_out": result.get("status") == "timeout",
+        "output_truncated": bool(result.get("output_truncated", False)),
+        "dropped_bytes": int(result.get("dropped_bytes", 0)),
+        "state_reason": reason,
+    }
+    if result.get("status") == "error":
+        resp["error"] = str(result.get("error", "pty error"))
+    return resp
+
+
+@mcp.tool()
+async def expect_prompt(
+    session_id: str,
+    timeout: float = 30.0,
+    ctx: Context | None = None,
+) -> dict:
+    """Wait until a shell prompt is detected (READY).
+
+    Intended for SSH workflows where login banners and prompts may arrive after
+    the initial `run()` returns. This avoids requiring agents to supply a fragile
+    regex like r"[$#] ?$".
+
+    Typical usage:
+    - run(session_id, "ssh host", timeout=2)
+    - expect_prompt(session_id, timeout=30)
+    - run(session_id, "cd /var/log", timeout=5)
+
+    Notes:
+    - This polls output internally; you do not need to call poll_output() in a loop.
+    - This does not create a new session_id. Call run()/send_input() first to create one.
     """
+    if session_id not in session_manager.sessions:
+        hint = "no such session_id"
+        tp = _session_transcript_path_if_exists(session_id)
+        if tp:
+            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
+        return {"status": "unknown", "prompt": "unknown", "matched": False, "timed_out": True, "state_reason": hint}
+
+    session = session_manager.sessions[session_id]
+
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    if state == "READY":
+        return {"status": "ready", "prompt": "shell", "matched": True, "timed_out": False, "state_reason": reason}
+
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {"status": "running", "prompt": "none", "matched": False, "timed_out": True, "state_reason": reason}
+
+        # Ingest any new output. This is what advances the VT100 renderer.
+        await asyncio.to_thread(session.poll_output, timeout=min(0.25, remaining), quiescence_ms=QUIESCENCE_MS)
+
+        snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+        state, reason = await determine_terminal_state(
+            ctx,
+            snap["screen"],
+            cursor_x=snap.get("cursor_x"),
+            prompt_regex=getattr(session, "prompt_regex", None),
+        )
+        if state == "READY":
+            return {"status": "ready", "prompt": "shell", "matched": True, "timed_out": False, "state_reason": reason}
+        if not session.alive:
+            return {"status": "eof", "prompt": "none", "matched": False, "timed_out": False, "state_reason": "pty eof"}
+
+
+@mcp.tool()
+async def get_metadata(session_id: str, ctx: Context | None = None) -> dict:
+    if session_id not in session_manager.sessions:
+        hint = "no such session_id"
+        if _session_log_dir_exists(session_id):
+            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "cwd": None,
+            "pid": None,
+            "cols": None,
+            "rows": None,
+            "started_at": None,
+            "last_activity_at": None,
+            "tag": None,
+            "prompt_regex": None,
+            "state_reason": hint,
+        }
+    session = session_manager.sessions[session_id]
+
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    meta = await asyncio.to_thread(session.metadata)
+    out = {k: meta.get(k) for k in ["cwd", "pid", "cols", "rows", "started_at", "last_activity_at", "tag", "prompt_regex"]}
+    out.update({"state_reason": reason})
+    return {"status": status, "prompt": prompt, **out}
+
+
+@mcp.tool()
+def list_sessions() -> dict:
+    return {"sessions": session_manager.list_sessions()}
+
+
+@mcp.tool()
+async def configure_session(
+    session_id: str,
+    tag: str | None = None,
+    prompt_regex: str | None = None,
+    ctx: Context | None = None,
+) -> dict:
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {"status": "terminated", "prompt": "none", "state_reason": ""}
+
+    try:
+        session_manager.configure_full(
+            session_id,
+            tag=tag,
+            prompt_regex=prompt_regex,
+        )
+    except RuntimeError as e:
+        if str(e) == "terminated":
+            return {"status": "terminated", "prompt": "none", "state_reason": ""}
+        raise ValueError(str(e))
+
+    session = session_manager.sessions.get(session_id)
+    if session is None:
+        cfg = session_manager._config.get(session_id, {})
+        return {
+            "status": "running",
+            "prompt": "unknown",
+            "session_exists": False,
+            "tag": cfg.get("tag"),
+            "prompt_regex": cfg.get("prompt_regex"),
+            "state_reason": "configured (session not yet created)",
+        }
+
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    return {
+        "status": status,
+        "prompt": prompt,
+        "session_exists": True,
+        "tag": getattr(session, "tag", None),
+        "prompt_regex": getattr(session, "prompt_regex", None),
+        "state_reason": reason,
+    }
+
+
+@mcp.tool()
+async def send_signal(
+    session_id: str,
+    signal: str,
+    strip_ansi: bool = True,
+    ctx: Context | None = None,
+) -> dict:
+    cwd = None
+    if session_id not in session_manager.sessions:
+        cwd = await _initial_cwd_from_ctx(ctx)
+    try:
+        session = session_manager.get_session(session_id, cwd=cwd)
+    except RuntimeError:
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
+
+    signum = None
+    s = str(signal).strip()
+    if s.isdigit():
+        signum = int(s)
+    else:
+        name = s.upper()
+        if not name.startswith("SIG"):
+            name = "SIG" + name
+        signum = getattr(signal_mod, name, None)
+        if signum is None:
+            raise ValueError(f"Unknown signal: {signal!r}")
+        signum = int(signum)
+
+    result = await asyncio.to_thread(session.send_signal, signum)
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    output = _maybe_strip_ansi(result.get("output", ""), strip_ansi=strip_ansi)
+    resp = {
+        "status": status,
+        "prompt": prompt,
+        "output": output,
+        "timed_out": result.get("status") == "timeout",
+        "output_truncated": bool(result.get("output_truncated", False)),
+        "dropped_bytes": int(result.get("dropped_bytes", 0)),
+        "state_reason": reason,
+    }
+    if result.get("status") in {"error", "eof"}:
+        resp["error"] = str(result.get("error", "pty error"))
+    return resp
+
+
+@mcp.tool()
+def transcript(session_id: str) -> dict:
+    """Get the transcript file path for this session."""
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {"status": "terminated", "prompt": "none", "transcript": None, "state_reason": ""}
+    if session_id not in session_manager.sessions:
+        hint = "no such session_id"
+        tp = _session_transcript_path_if_exists(session_id)
+        if tp:
+            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
+            return {"status": "unknown", "prompt": "unknown", "transcript": tp, "state_reason": hint}
+        return {"status": "unknown", "prompt": "unknown", "transcript": None, "state_reason": hint}
+    session = session_manager.sessions[session_id]
+
+    snap = session.screen_snapshot(log=False, drain=False)
+    state, reason = detect_state_heuristic(
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    return {"status": status, "prompt": prompt, "transcript": session.transcript(), "state_reason": reason}
+
+
+@mcp.tool()
+async def terminate(session_id: str) -> dict:
+    """Terminate a PTY session. Future calls using the same `session_id` are rejected."""
+    session_manager._terminated.add(session_id)
     if session_id in session_manager.sessions:
         await asyncio.to_thread(session_manager.sessions[session_id].terminate)
         del session_manager.sessions[session_id]
-        session_manager.clear_password(session_id)
-        return f"Session '{session_id}' terminated"
-    return f"Session '{session_id}' not found"
+        session_manager._last_used.pop(session_id, None)
+    return {"status": "terminated", "prompt": "none", "state_reason": ""}
 
 
 def signal_handler(sig, frame):
@@ -671,8 +1343,8 @@ def signal_handler(sig, frame):
 def main():
     """Main entry point for MCP server."""
     _configure_logging()
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    signal_mod.signal(signal_mod.SIGINT, signal_handler)
+    signal_mod.signal(signal_mod.SIGTERM, signal_handler)
     mcp.run()
 
 
