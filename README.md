@@ -1,110 +1,116 @@
 # PiloTY
 
-PiloTY is an MCP server that provides stateful terminal sessions via a PTY. A `session_id` is a persistent handle to a running shell, so agents can drive SSH, debuggers, REPLs, pagers, and full-screen TUIs without losing state between tool calls.
+PiloTY is an MCP server that gives an agent a persistent, interactive terminal.
 
-## Security model
+If you have used Claude Code / Codex to run shell commands, you have probably hit the same wall: tool calls tend to be stateless. Each call starts "fresh", so environment variables disappear, interactive programs cannot be driven reliably, and long-running processes get cut off or orphaned while the agent is thinking.
 
-PiloTY exposes unrestricted terminal access. Treat it like giving the agent your keyboard.
+PiloTY exists to make the agent's terminal behave more like a human's: start something in a real terminal, come back later, and keep going.
 
-- Secrets can appear in the rendered screen and the transcript.
-- `send_password()` suppresses transcript logging and terminal echo for that specific send, but it does not prevent other prompts from echoing sensitive data.
+Warning: PiloTY exposes unrestricted terminal access. Treat it like giving the agent your keyboard.
 
-## Session model
+## What it enables
 
-One PTY per `session_id`.
+- Long-running commands: builds, installs, migrations, test suites. Start once, check output later.
+- Log monitoring: `tail -f`, `journalctl -f`, `kubectl logs -f`, CI logs, service restarts.
+- "Vibe debugging": keep a REPL/debugger open while the agent reads code and tries ideas (`python`, `ipython`, `pdb`).
+- Privileged operations: handle interactive password prompts (`sudo`, SSH passwords, key passphrases).
+- SSH-based devops: keep a remote login session alive across tool calls; run remote commands in the same shell.
+- Terminal UIs: `less`, `man`, `top`, `vim` can work, but cursor-heavy programs often require screen snapshots instead of plain text output.
 
-- Session state persists: cwd, environment, foreground process, job control, remote SSH connection, REPL/debugger state.
-- Sessions are created by tools that send input (`run`, `send_input`, `send_control`, `send_password`, `poll_output`, `expect`). View-only tools do not create sessions.
-- `terminate(session_id)` is final. Later calls with the same `session_id` return `status="terminated"`.
+## Quickstart
 
-### Initial cwd
+PiloTY is meant to be launched by an MCP client over stdio.
 
-For a newly created session, PiloTY uses the MCP client root directory (if the client supports roots and provides one). Otherwise it uses the server process cwd.
+Add it to Codex CLI as an MCP server:
 
-### Default shell
+```bash
+codex mcp add piloty -- uvx --from git+https://github.com/yiwenlu66/PiloTY.git piloty
+```
 
-Sessions spawn `bash --noprofile --norc`. If you need another shell, start it inside that bash (`zsh`, `fish`, etc).
+If you prefer SSH-based Git fetch:
 
-### Quiescence
+```bash
+codex mcp add piloty -- uvx --from git+ssh://git@github.com/yiwenlu66/PiloTY.git piloty
+```
 
-Output collection uses quiescence: "silence for N ms". Configure with `PILOTY_QUIESCENCE_MS` (default `1000`).
+If you already have a local clone:
 
-## Output vs rendered views
+```bash
+codex mcp add piloty -- uv --directory /path/to/PiloTY run piloty
+```
 
-PiloTY keeps two representations of terminal state:
+Run the server command directly (without adding it to an MCP client):
 
-- Incremental stream output ("what arrived since the last ingestion call")
-- VT100-rendered screen and scrollback ("what the terminal looks like")
+```bash
+uvx --from git+https://github.com/yiwenlu66/PiloTY.git piloty
+```
 
-Tools that ingest PTY output advance the VT100 renderer. View tools do not read from the PTY stream (no hidden output consumption).
+## Mental model
 
-## Agent-facing tools
+One session is one real interactive terminal that stays alive across tool calls.
 
-All tools take `session_id`.
+- State persists: cwd, environment variables, foreground process, remote SSH connection, REPL/debugger state.
+- PiloTY tracks both the raw output stream and a rendered screen/scrollback view.
 
-- `run(session_id, command, timeout=30, strip_ansi=true)`: send a line (adds newline)
-- `send_input(session_id, text, timeout=30, strip_ansi=true)`: send text without a newline
-- `send_control(session_id, key, timeout=5, strip_ansi=true)`: send a control key (`c`, `d`, `z`, `l`, `[` for escape)
-- `send_password(session_id, password, timeout=30)`: send a password (no transcript logging; echo suppressed)
-- `send_signal(session_id, signal, strip_ansi=true)`: send an OS signal to the foreground process group
+PiloTY keeps two representations:
 
-- `poll_output(session_id, timeout=0.1, strip_ansi=true)`: wait up to `timeout` for any new output without sending input (returns empty output only on timeout)
-- `expect(session_id, pattern, timeout=30, strip_ansi=true)`: wait for a regex; checks already-rendered text first, then waits for new output
-- `expect_prompt(session_id, timeout=30)`: wait until a shell prompt is detected (SSH/login workflows without agent-supplied regex)
+- `output`: incremental text stream (optionally ANSI-stripped)
+- Rendered screen/scrollback: what a human would see in a terminal
 
-- `get_screen(session_id)`: rendered screen snapshot (includes cursor position and vt100 health)
-- `get_scrollback(session_id, lines=200)`: best-effort rendered scrollback
-- `clear_scrollback(session_id)`: clears renderer scrollback history without sending input and without changing the current visible screen
+Sessions are addressed by a `session_id` string. Reusing the same id is what keeps state.
 
-- `get_metadata(session_id)`: cwd, foreground pid, dimensions, timestamps, tag
-- `configure_session(session_id, tag=None, prompt_regex=None)`: set a tag and optional prompt regex (escape hatch)
-- `list_sessions()`: list active and terminated session ids (with metadata)
-- `transcript(session_id)`: transcript path (also returns the on-disk path if a session was evicted/restarted)
-- `terminate(session_id)`: terminate a session (final)
+## Tool reference (for MCP integrators)
 
-### `status` and `prompt`
+All tools take a `session_id` string.
 
-PiloTY returns a single processed `status` plus a separate `prompt` classification, derived from the rendered screen.
+Input/output:
 
-- `status`: `running`, `ready`, `repl`, `password`, `confirm`, `editor`, `pager`, `unknown`, `eof`, `terminated`
-- `prompt`: `shell`, `python`, `pdb`, `none`, `unknown`
+- `run(...)`: send a line (adds newline)
+- `poll_output(...)`: wait up to `timeout` for new output without sending input
+- `send_input(...)`: send text without newline
+- `send_control(...)`: send a control key (`c`, `d`, `z`, `l`, `[` for escape)
+- `send_password(...)`: send a password (no transcript logging; echo suppressed for this send)
+- `expect_prompt(...)`: wait for a shell prompt (useful after `ssh`/login output where the prompt appears later)
 
-`status` is an agent-facing summary of "what input is likely needed next". It is not a transport state, and it is best-effort.
+Rendered view:
 
-## Common workflows
+- `get_screen(...)`: rendered screen snapshot (cursor position, rendering status)
+- `get_scrollback(...)`: rendered scrollback (best-effort)
 
-### Long-running command + output monitoring
+Session management:
 
-- Start the job (foreground or via `&`)
-- Use `poll_output(timeout=...)` to pick up output that arrives later
-- Use `get_screen()` when the incremental output is hard to interpret (pagers, full-screen TUIs)
-- Stop follow/streaming with Ctrl+C (`send_control(key="c")`)
+- `get_metadata(...)`: cwd, foreground pid, dimensions, timestamps, tag
+- `transcript(...)`: transcript path (includes on-disk path if a session was evicted/restarted)
+- `terminate(...)`: terminate a session (final; later calls reject the id)
 
-### Interactive debugging (pdb)
+For tool signatures and return fields, read `piloty/mcp_server.py`.
 
-- `run(session_id, "python -m pdb path/to/script.py", timeout=5)`
-- Drive the debugger with `send_input()` and inspect state with `get_screen()`
+## Limitations
 
-### SSH without regex
-
-For slow banners and delayed prompt printing:
-
-- `run(session_id, "ssh host", timeout=2)` (do not expect the banner to be fully captured)
-- `expect_prompt(session_id, timeout=30)` (waits for a READY prompt)
-
-### Pagers and TUIs (less, man, vim)
-
-`send_input(strip_ansi=true)` returns a normalized text stream, which can still be ambiguous for cursor-motion heavy TUIs. Prefer `get_screen()` as the "what the user would see" view.
+- Status/prompt detection is best-effort and can be wrong (especially for custom prompts and cursor-heavy TUIs).
+- Plain text output can be misleading for full-screen programs; use screen snapshots when layout matters.
+- `send_password()` suppresses transcript logging and terminal echo for that send. It does not prevent other prompts/programs from echoing secrets later.
+- Quiescence-based output collection can be confused by programs that print periodic noise. Tune with `PILOTY_QUIESCENCE_MS` (default `1000`).
 
 ## Logs
 
 Each session writes logs under `~/.piloty/`:
 
-- `~/.piloty/sessions/<session-id>/transcript.log`: raw PTY bytes (combined stdout and stderr)
-- `~/.piloty/sessions/<session-id>/interaction.log`: best-effort structured interactions
-- `~/.piloty/sessions/<session-id>/session.json`: metadata
+- `~/.piloty/sessions/<session-id>/transcript.log`: raw PTY bytes (combined stdout/stderr)
+- `~/.piloty/sessions/<session-id>/commands.log`: inputs sent (best-effort)
+- `~/.piloty/sessions/<session-id>/interaction.log`: inputs plus captured output (best-effort)
+- `~/.piloty/sessions/<session-id>/session.json`: metadata snapshot
+- `~/.piloty/active/<session-id>`: symlink to the current session directory (when symlinks are supported)
 
-Server logs go to `/tmp/piloty.log`.
+Server logs default to `/tmp/piloty.log`.
+
+`tools/session_viewer.py` can inspect sessions:
+
+```bash
+python tools/session_viewer.py list
+python tools/session_viewer.py info <session-id>
+python tools/session_viewer.py tail -f <session-id>
+```
 
 ## Development
 
@@ -112,7 +118,7 @@ Repository layout:
 
 ```
 piloty/
-  core.py        # PTY + VT100 renderer + session logs
+  core.py        # PTY + terminal renderer + session logs
   mcp_server.py  # MCP tools + state inference
 tests/
 tools/
@@ -120,22 +126,10 @@ tools/
   session_viewer.py
 ```
 
-Local development:
+Run tests:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
 python -m pytest -q
-```
-
-Developer tools:
-
-```bash
-python tools/pty_playground.py
-python tools/session_viewer.py list
-python tools/session_viewer.py info <session-id>
-python tools/session_viewer.py tail -f <session-id>
 ```
 
 License: Apache License 2.0, see `LICENSE`.
