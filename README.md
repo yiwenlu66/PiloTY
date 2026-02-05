@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="assets/logo.png" alt="PiloTY logo" width="220" />
+</p>
+
 # PiloTY
 
-PiloTY is an MCP server that gives an agent a persistent, interactive terminal.
+PiloTY (PTY for your AI Copilot) is an MCP server that gives an agent a persistent, interactive terminal.
 
 If you have used Claude Code / Codex to run shell commands, you have probably hit the same wall: tool calls tend to be stateless. Each call starts "fresh", so environment variables disappear, interactive programs cannot be driven reliably, and long-running processes get cut off or orphaned while the agent is thinking.
 
