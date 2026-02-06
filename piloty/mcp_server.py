@@ -21,7 +21,6 @@ import asyncio
 import re
 import time
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
@@ -211,6 +210,8 @@ class SessionManager:
                         pass
                     self.sessions.pop(oldest_id, None)
                     self._last_used.pop(oldest_id, None)
+            if cwd is None:
+                raise ValueError("cwd is required when creating a new session")
             cfg = self._config.get(session_id, {})
             self.sessions[session_id] = PTY(
                 session_id=session_id,
@@ -521,16 +522,6 @@ def detect_state_heuristic(
     return "RUNNING", "no prompt detected"
 
 
-def _file_uri_to_path(uri: str) -> str | None:
-    if not uri:
-        return None
-    uri = str(uri)
-    parsed = urlparse(uri)
-    if parsed.scheme != "file":
-        return None
-    return unquote(parsed.path)
-
-
 def _session_log_dir_exists(session_id: str) -> bool:
     base = os.path.join(str(Path.home()), ".piloty", "sessions")
     if os.path.isdir(os.path.join(base, session_id)):
@@ -551,28 +542,74 @@ def _session_transcript_path_if_exists(session_id: str) -> str | None:
     return None
 
 
-async def _initial_cwd_from_ctx(ctx: Context | None) -> str | None:
-    if not ctx or not getattr(ctx, "session", None):
-        return None
+def _missing_session_hint(session_id: str) -> str:
+    hint = "no such session_id; call create_session(session_id, cwd) first"
+    if _session_log_dir_exists(session_id):
+        hint = "no such session_id (server restarted or session evicted; logs exist on disk); call create_session(session_id, cwd) first"
+    return hint
 
-    client_params = getattr(ctx.session, "client_params", None)
-    caps = getattr(client_params, "capabilities", None) if client_params else None
-    roots_caps = getattr(caps, "roots", None) if caps else None
-    if roots_caps is None:
-        return None
 
-    try:
-        roots_result = await ctx.session.list_roots()
-    except Exception:
-        return None
+@mcp.tool()
+async def create_session(
+    session_id: str,
+    cwd: str,
+    tag: str | None = None,
+    prompt_regex: str | None = None,
+    ctx: Context | None = None,
+) -> dict:
+    """Create a PTY session with an explicit working directory.
 
-    roots = getattr(roots_result, "roots", None) or []
-    for root in roots:
-        uri = getattr(root, "uri", None)
-        path = _file_uri_to_path(uri)
-        if path and os.path.isdir(path):
-            return path
-    return None
+    MCP does not provide a standard field for the client's current working
+    directory. The caller must provide `cwd` explicitly.
+    """
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {"status": "terminated", "prompt": "none", "created": False, "state_reason": ""}
+
+    if not cwd:
+        raise ValueError("cwd must be a non-empty path")
+    abs_cwd = os.path.abspath(cwd)
+    if not os.path.isdir(abs_cwd):
+        raise ValueError(f"cwd is not an existing directory: {abs_cwd}")
+
+    session = session_manager.sessions.get(session_id)
+    if session is None:
+        try:
+            session_manager.configure_full(session_id, tag=tag, prompt_regex=prompt_regex)
+            session = session_manager.get_session(session_id, cwd=abs_cwd)
+        except RuntimeError:
+            return {"status": "terminated", "prompt": "none", "created": False, "state_reason": ""}
+        created = True
+        created_reason = "session created"
+    else:
+        meta = await asyncio.to_thread(session.metadata)
+        existing_cwd = os.path.abspath(str(meta.get("cwd", "")))
+        if existing_cwd and existing_cwd != abs_cwd:
+            raise ValueError(
+                f"session_id '{session_id}' already exists with cwd '{existing_cwd}', requested '{abs_cwd}'"
+            )
+        session_manager.configure_full(session_id, tag=tag, prompt_regex=prompt_regex)
+        created = False
+        created_reason = "session already exists"
+
+    snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
+    state, reason = await determine_terminal_state(
+        ctx,
+        snap["screen"],
+        cursor_x=snap.get("cursor_x"),
+        prompt_regex=getattr(session, "prompt_regex", None),
+    )
+    prompt = _prompt_from_state(state, reason)
+    status = _status_from_state(terminated=False, alive=session.alive, state=state)
+    meta = await asyncio.to_thread(session.metadata)
+    return {
+        "status": status,
+        "prompt": prompt,
+        "created": created,
+        "cwd": meta.get("cwd"),
+        "tag": meta.get("tag"),
+        "prompt_regex": meta.get("prompt_regex"),
+        "state_reason": f"{created_reason}: {reason}",
+    }
 
 
 @mcp.tool()
@@ -585,18 +622,38 @@ async def run(
 ) -> dict:
     """Execute a command in a stateful PTY session.
 
+    Requires an existing session created via `create_session(session_id, cwd)`.
+
     Quiescence: reads until the PTY is silent for PILOTY_QUIESCENCE_MS (default 1000ms),
     or until `timeout` seconds elapse.
 
     Common SSH pattern:
+    - create_session(session_id, cwd)
     - run(session_id, "ssh host", timeout=...)
     - expect_prompt(session_id, timeout=...)  # wait for remote shell prompt
     """
-    cwd = None
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        cwd = await _initial_cwd_from_ctx(ctx)
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": _missing_session_hint(session_id),
+        }
     try:
-        session = session_manager.get_session(session_id, cwd=cwd)
+        session = session_manager.get_session(session_id)
     except RuntimeError:
         return {
             "status": "terminated",
@@ -643,12 +700,32 @@ async def send_input(
     strip_ansi: bool = True,
     ctx: Context | None = None,
 ) -> dict:
-    """Send raw input to a stateful terminal session (no newline added)."""
-    cwd = None
+    """Send raw input to a stateful terminal session (no newline added).
+
+    Requires an existing session created via `create_session(session_id, cwd)`.
+    """
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        cwd = await _initial_cwd_from_ctx(ctx)
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": _missing_session_hint(session_id),
+        }
     try:
-        session = session_manager.get_session(session_id, cwd=cwd)
+        session = session_manager.get_session(session_id)
     except RuntimeError:
         return {
             "status": "terminated",
@@ -695,16 +772,35 @@ async def send_password(
 ) -> dict:
     """Send a password plus newline.
 
+    Requires an existing session created via `create_session(session_id, cwd)`.
+
     Security model:
     - Forces terminal echo off for this send operation (`echo=False`).
     - Disables transcript logging for this send operation (`log=False`).
     - Returns `output` as the literal string "[password sent]".
     """
-    cwd = None
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        cwd = await _initial_cwd_from_ctx(ctx)
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": _missing_session_hint(session_id),
+        }
     try:
-        session = session_manager.get_session(session_id, cwd=cwd)
+        session = session_manager.get_session(session_id)
     except RuntimeError:
         return {
             "status": "terminated",
@@ -768,6 +864,8 @@ async def send_control(
 ) -> dict:
     """Send a control character to the terminal.
 
+    Requires an existing session created via `create_session(session_id, cwd)`.
+
     Keys:
     - `c` sends Ctrl+C, commonly used to interrupt.
     - `d` sends Ctrl+D (EOF in many programs).
@@ -777,11 +875,28 @@ async def send_control(
 
     Returns the same shape as `run()`.
     """
-    cwd = None
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        cwd = await _initial_cwd_from_ctx(ctx)
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": _missing_session_hint(session_id),
+        }
     try:
-        session = session_manager.get_session(session_id, cwd=cwd)
+        session = session_manager.get_session(session_id)
     except RuntimeError:
         return {
             "status": "terminated",
@@ -838,17 +953,36 @@ async def poll_output(
 ) -> dict:
     """Wait for new output without sending input.
 
+    Requires an existing session created via `create_session(session_id, cwd)`.
+
     Quiescence: returns immediately once any output is observed and the PTY is
     silent for PILOTY_QUIESCENCE_MS (default 1000ms). Returns empty output only
     when `timeout` elapses without any output.
 
     If you need to wait for a shell prompt (e.g., after SSH), use expect_prompt().
     """
-    cwd = None
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        cwd = await _initial_cwd_from_ctx(ctx)
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": _missing_session_hint(session_id),
+        }
     try:
-        session = session_manager.get_session(session_id, cwd=cwd)
+        session = session_manager.get_session(session_id)
     except RuntimeError:
         return {
             "status": "terminated",
@@ -893,11 +1027,23 @@ async def poll_output(
 
 @mcp.tool()
 async def get_screen(session_id: str, ctx: Context | None = None) -> dict:
-    """Get the current VT100-rendered terminal screen snapshot."""
+    """Get the current VT100-rendered terminal screen snapshot.
+
+    Requires an existing session created via `create_session(session_id, cwd)`.
+    """
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "screen": "",
+            "cursor_x": None,
+            "cursor_y": None,
+            "vt100_ok": None,
+            "rows": None,
+            "cols": None,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        hint = "no such session_id"
-        if _session_log_dir_exists(session_id):
-            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
         return {
             "status": "unknown",
             "prompt": "unknown",
@@ -907,7 +1053,7 @@ async def get_screen(session_id: str, ctx: Context | None = None) -> dict:
             "vt100_ok": None,
             "rows": None,
             "cols": None,
-            "state_reason": hint,
+            "state_reason": _missing_session_hint(session_id),
         }
     session = session_manager.sessions[session_id]
 
@@ -936,17 +1082,27 @@ async def get_screen(session_id: str, ctx: Context | None = None) -> dict:
 
 @mcp.tool()
 async def get_scrollback(session_id: str, lines: int = 200, ctx: Context | None = None) -> dict:
+    """Get rendered terminal scrollback.
+
+    Requires an existing session created via `create_session(session_id, cwd)`.
+    """
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "scrollback": "",
+            "rows": None,
+            "cols": None,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        hint = "no such session_id"
-        if _session_log_dir_exists(session_id):
-            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
         return {
             "status": "unknown",
             "prompt": "unknown",
             "scrollback": "",
             "rows": None,
             "cols": None,
-            "state_reason": hint,
+            "state_reason": _missing_session_hint(session_id),
         }
     session = session_manager.sessions[session_id]
 
@@ -973,11 +1129,14 @@ async def get_scrollback(session_id: str, lines: int = 200, ctx: Context | None 
 
 @mcp.tool()
 async def clear_scrollback(session_id: str, ctx: Context | None = None) -> dict:
+    """Clear rendered scrollback history while preserving current screen.
+
+    Requires an existing session created via `create_session(session_id, cwd)`.
+    """
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {"status": "terminated", "prompt": "none", "state_reason": ""}
     if session_id not in session_manager.sessions:
-        hint = "no such session_id"
-        if _session_log_dir_exists(session_id):
-            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
-        return {"status": "unknown", "prompt": "unknown", "state_reason": hint}
+        return {"status": "unknown", "prompt": "unknown", "state_reason": _missing_session_hint(session_id)}
     session = session_manager.sessions[session_id]
 
     await asyncio.to_thread(session.clear_scrollback)
@@ -1001,11 +1160,38 @@ async def expect(
     strip_ansi: bool = True,
     ctx: Context | None = None,
 ) -> dict:
-    cwd = None
+    """Wait for regex match in terminal output/scrollback.
+
+    Requires an existing session created via `create_session(session_id, cwd)`.
+    """
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "matched": False,
+            "match": None,
+            "groups": [],
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        cwd = await _initial_cwd_from_ctx(ctx)
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "output": "",
+            "matched": False,
+            "match": None,
+            "groups": [],
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": _missing_session_hint(session_id),
+        }
     try:
-        session = session_manager.get_session(session_id, cwd=cwd)
+        session = session_manager.get_session(session_id)
     except RuntimeError:
         return {
             "status": "terminated",
@@ -1090,24 +1276,27 @@ async def expect_prompt(
 ) -> dict:
     """Wait until a shell prompt is detected (READY).
 
+    Requires an existing session created via `create_session(session_id, cwd)`.
+
     Intended for SSH workflows where login banners and prompts may arrive after
     the initial `run()` returns. This avoids requiring agents to supply a fragile
     regex like r"[$#] ?$".
 
     Typical usage:
+    - create_session(session_id, cwd)
     - run(session_id, "ssh host", timeout=2)
     - expect_prompt(session_id, timeout=30)
     - run(session_id, "cd /var/log", timeout=5)
 
     Notes:
     - This polls output internally; you do not need to call poll_output() in a loop.
-    - This does not create a new session_id. Call run()/send_input() first to create one.
+    - This does not create a new session_id. Call create_session() first.
     """
     if session_id not in session_manager.sessions:
-        hint = "no such session_id"
+        hint = _missing_session_hint(session_id)
         tp = _session_transcript_path_if_exists(session_id)
         if tp:
-            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
+            hint = _missing_session_hint(session_id)
         return {"status": "unknown", "prompt": "unknown", "matched": False, "timed_out": True, "state_reason": hint}
 
     session = session_manager.sessions[session_id]
@@ -1146,10 +1335,25 @@ async def expect_prompt(
 
 @mcp.tool()
 async def get_metadata(session_id: str, ctx: Context | None = None) -> dict:
+    """Get metadata for an existing PTY session.
+
+    Requires an existing session created via `create_session(session_id, cwd)`.
+    """
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "cwd": None,
+            "pid": None,
+            "cols": None,
+            "rows": None,
+            "started_at": None,
+            "last_activity_at": None,
+            "tag": None,
+            "prompt_regex": None,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        hint = "no such session_id"
-        if _session_log_dir_exists(session_id):
-            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
         return {
             "status": "unknown",
             "prompt": "unknown",
@@ -1161,7 +1365,7 @@ async def get_metadata(session_id: str, ctx: Context | None = None) -> dict:
             "last_activity_at": None,
             "tag": None,
             "prompt_regex": None,
-            "state_reason": hint,
+            "state_reason": _missing_session_hint(session_id),
         }
     session = session_manager.sessions[session_id]
 
@@ -1215,7 +1419,7 @@ async def configure_session(
             "session_exists": False,
             "tag": cfg.get("tag"),
             "prompt_regex": cfg.get("prompt_regex"),
-            "state_reason": "configured (session not yet created)",
+            "state_reason": "configured (session not yet created; call create_session(session_id, cwd))",
         }
 
     snap = await asyncio.to_thread(session.screen_snapshot, drain=False)
@@ -1244,11 +1448,32 @@ async def send_signal(
     strip_ansi: bool = True,
     ctx: Context | None = None,
 ) -> dict:
-    cwd = None
+    """Send an OS signal to the foreground process in a session.
+
+    Requires an existing session created via `create_session(session_id, cwd)`.
+    """
+    if session_id in getattr(session_manager, "_terminated", set()):
+        return {
+            "status": "terminated",
+            "prompt": "none",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": "",
+        }
     if session_id not in session_manager.sessions:
-        cwd = await _initial_cwd_from_ctx(ctx)
+        return {
+            "status": "unknown",
+            "prompt": "unknown",
+            "output": "",
+            "timed_out": False,
+            "output_truncated": False,
+            "dropped_bytes": 0,
+            "state_reason": _missing_session_hint(session_id),
+        }
     try:
-        session = session_manager.get_session(session_id, cwd=cwd)
+        session = session_manager.get_session(session_id)
     except RuntimeError:
         return {
             "status": "terminated",
@@ -1304,10 +1529,9 @@ def transcript(session_id: str) -> dict:
     if session_id in getattr(session_manager, "_terminated", set()):
         return {"status": "terminated", "prompt": "none", "transcript": None, "state_reason": ""}
     if session_id not in session_manager.sessions:
-        hint = "no such session_id"
+        hint = _missing_session_hint(session_id)
         tp = _session_transcript_path_if_exists(session_id)
         if tp:
-            hint = "no such session_id (server restarted or session evicted; logs exist on disk)"
             return {"status": "unknown", "prompt": "unknown", "transcript": tp, "state_reason": hint}
         return {"status": "unknown", "prompt": "unknown", "transcript": None, "state_reason": hint}
     session = session_manager.sessions[session_id]

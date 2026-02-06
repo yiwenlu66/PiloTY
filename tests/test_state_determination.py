@@ -1,4 +1,5 @@
 import asyncio
+import os
 from types import SimpleNamespace
 
 from piloty import mcp_server
@@ -102,6 +103,7 @@ def test_expect_matches_already_visible_screen():
 
     session_id = "test_expect_visible"
     try:
+        asyncio.run(mcp_server.create_session(session_id=session_id, cwd=os.getcwd()))
         asyncio.run(mcp_server.run(session_id=session_id, command="echo EXPECTME", timeout=2.0))
         r = asyncio.run(mcp_server.expect(session_id=session_id, pattern="EXPECTME", timeout=0.1))
         assert r["matched"] is True
@@ -121,6 +123,7 @@ def test_expect_prompt_waits_for_prompt_after_timeout_run():
 
     session_id = "test_expect_prompt"
     try:
+        asyncio.run(mcp_server.create_session(session_id=session_id, cwd=os.getcwd()))
         r = asyncio.run(
             mcp_server.run(
                 session_id=session_id,

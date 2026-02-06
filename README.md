@@ -65,10 +65,11 @@ Sessions are addressed by a `session_id` string. Reusing the same id is what kee
 
 ## Tool reference (for MCP integrators)
 
-All tools take a `session_id` string.
+All tools take a `session_id` string. MCP does not expose client cwd as a standard field, so call `create_session(session_id, cwd)` before terminal I/O.
 
 Input/output:
 
+- `create_session(...)`: create a session with explicit cwd
 - `run(...)`: send a line (adds newline)
 - `poll_output(...)`: wait up to `timeout` for new output without sending input
 - `send_input(...)`: send text without newline

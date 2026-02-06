@@ -3,11 +3,14 @@ import asyncio
 from piloty import mcp_server
 
 
-def test_mcp_tool_shapes_include_status_and_prompt():
+def test_mcp_tool_shapes_include_status_and_prompt(tmp_path):
     prev = mcp_server.QUIESCENCE_MS
     mcp_server.QUIESCENCE_MS = 50
     session_id = "test_mcp_shapes"
     try:
+        created = asyncio.run(mcp_server.create_session(session_id=session_id, cwd=str(tmp_path)))
+        assert created["created"] is True
+
         r = asyncio.run(mcp_server.run(session_id=session_id, command="echo hi", timeout=2.0))
         assert "screen" not in r
         assert set(r.keys()) >= {"status", "prompt", "output", "timed_out"}
@@ -39,9 +42,10 @@ def test_mcp_tool_shapes_include_status_and_prompt():
         mcp_server.QUIESCENCE_MS = prev
 
 
-def test_mcp_terminate_is_final():
+def test_mcp_terminate_is_final(tmp_path):
     session_id = "test_mcp_terminate_final"
     try:
+        asyncio.run(mcp_server.create_session(session_id=session_id, cwd=str(tmp_path)))
         asyncio.run(mcp_server.run(session_id=session_id, command="echo hi", timeout=2.0))
         asyncio.run(mcp_server.terminate(session_id))
         r = asyncio.run(mcp_server.run(session_id=session_id, command="echo nope", timeout=2.0))
