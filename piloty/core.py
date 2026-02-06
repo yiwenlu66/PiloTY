@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -51,6 +52,48 @@ class _PyteListenerProxy:
             return target(*args)
 
         return wrapper
+
+
+def _path_without_entry(path_value: str, entry: str) -> str:
+    if not path_value:
+        return ""
+    normalized_entry = os.path.normcase(os.path.abspath(entry))
+    kept: list[str] = []
+    for part in path_value.split(os.pathsep):
+        if not part:
+            continue
+        normalized_part = os.path.normcase(os.path.abspath(part))
+        if normalized_part == normalized_entry:
+            continue
+        kept.append(part)
+    return os.pathsep.join(kept)
+
+
+def _session_env(rows: int, cols: int) -> dict[str, str]:
+    env = dict(os.environ)
+    leaked_virtual_env = env.pop("VIRTUAL_ENV", None)
+    env.pop("VIRTUAL_ENV_PROMPT", None)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env.pop("__PYVENV_LAUNCHER__", None)
+
+    leaked_bins: set[str] = set()
+    if leaked_virtual_env:
+        leaked_bins.add(os.path.abspath(os.path.join(leaked_virtual_env, "bin")))
+
+    exe_bin = os.path.abspath(os.path.dirname(sys.executable))
+    if (Path(exe_bin).parent / "pyvenv.cfg").exists():
+        leaked_bins.add(exe_bin)
+
+    path_value = env.get("PATH", "")
+    for leaked_bin in leaked_bins:
+        path_value = _path_without_entry(path_value, leaked_bin)
+    env["PATH"] = path_value
+
+    env["TERM"] = "xterm-256color"
+    env["LINES"] = str(rows)
+    env["COLUMNS"] = str(cols)
+    return env
 
 
 class PTY:
@@ -117,12 +160,7 @@ class PTY:
         self._fatal_error: str | None = None
         self._last_output_time = time.monotonic()
 
-        env = {
-            **os.environ,
-            "TERM": "xterm-256color",
-            "LINES": str(rows),
-            "COLUMNS": str(cols),
-        }
+        env = _session_env(rows=rows, cols=cols)
 
         self._process = pexpect.spawn(
             self.shell,
