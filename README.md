@@ -63,32 +63,20 @@ PiloTY keeps two representations:
 
 Sessions are addressed by a `session_id` string. Reusing the same id is what keeps state.
 
-## Tool reference (for MCP integrators)
+## Integration notes (for MCP integrators)
 
-All tools take a `session_id` string. MCP does not expose client cwd as a standard field, so call `create_session(session_id, cwd)` before terminal I/O.
+MCP does not expose a standard "client cwd" field, so the first step is always to create a session with an explicit working directory, then reuse the same `session_id` for subsequent calls.
 
-Input/output:
+Typical agent workflow:
 
-- `create_session(...)`: create a session with explicit cwd
-- `run(...)`: send a line (adds newline)
-- `poll_output(...)`: wait up to `timeout` for new output without sending input
-- `send_input(...)`: send text without newline
-- `send_control(...)`: send a control key (`c`, `d`, `z`, `l`, `[` for escape)
-- `send_password(...)`: send a password (no transcript logging; echo suppressed for this send)
-- `expect_prompt(...)`: wait for a shell prompt (useful after `ssh`/login output where the prompt appears later)
+- Create a session (explicit cwd) and reuse the same `session_id`.
+- Run commands, poll for output, and send raw input/control keys for interactive programs.
+- For cursor-heavy TUIs, rely on rendered screen snapshots/scrollback rather than plain text output.
+- Use `expect_prompt` after `ssh` or other login flows where the prompt appears later.
+- If prompt detection is wrong (looks idle at a prompt but status stays "running"), configure a custom shell-prompt regex.
+- Use `send_password` for secret entry; terminate the session when done.
 
-Rendered view:
-
-- `get_screen(...)`: rendered screen snapshot (cursor position, rendering status)
-- `get_scrollback(...)`: rendered scrollback (best-effort)
-
-Session management:
-
-- `get_metadata(...)`: cwd, foreground pid, dimensions, timestamps, tag
-- `transcript(...)`: transcript path (includes on-disk path if a session was evicted/restarted)
-- `terminate(...)`: terminate a session (final; later calls reject the id)
-
-For tool signatures and return fields, read `piloty/mcp_server.py`.
+For exact tool names, arguments, and return fields, use your MCP client's tool schema or read `piloty/mcp_server.py`.
 
 ## Limitations
 

@@ -107,8 +107,8 @@ class PTY:
         cwd: str | None = None,
         shell: str | None = None,
         shell_args: list[str] | None = None,
-        prompt_regex: str | None = None,
-        tag: str | None = None,
+        shell_prompt_regex: str | None = None,
+        description: str | None = None,
         log_dir: str | None = None,
     ):
         self.session_id = session_id
@@ -122,8 +122,8 @@ class PTY:
         else:
             self.shell = shell
             self.shell_args = shell_args or []
-        self.prompt_regex = prompt_regex
-        self.tag = tag
+        self.shell_prompt_regex = shell_prompt_regex
+        self.description = description
         self._lock = threading.Lock()
         self._quiescence_ms = int(os.getenv("PILOTY_QUIESCENCE_MS", "1000"))
 
@@ -502,10 +502,10 @@ class PTY:
             "rows": self.rows,
             "started_at": self._started_at,
             "last_activity_at": self._last_activity_at,
-            "tag": self.tag,
+            "description": self.description,
             "shell": self.shell,
             "shell_args": self.shell_args,
-            "prompt_regex": self.prompt_regex,
+            "shell_prompt_regex": self.shell_prompt_regex,
         }
 
     def transcript(self) -> str:

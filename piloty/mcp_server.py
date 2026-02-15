@@ -21,11 +21,12 @@ import asyncio
 import re
 import time
 from pathlib import Path
+from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
 from mcp.types import SamplingMessage, TextContent
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from .core import PTY
 
@@ -216,48 +217,54 @@ class SessionManager:
             self.sessions[session_id] = PTY(
                 session_id=session_id,
                 cwd=cwd,
-                prompt_regex=cfg.get("prompt_regex"),
-                tag=cfg.get("tag"),
+                shell_prompt_regex=cfg.get("shell_prompt_regex"),
+                description=cfg.get("description"),
             )
         self._last_used[session_id] = time.monotonic()
         return self.sessions[session_id]
 
-    def configure(self, session_id: str, *, tag: str | None = None, prompt_regex: str | None = None):
+    def configure(
+        self,
+        session_id: str,
+        *,
+        description: str | None = None,
+        shell_prompt_regex: str | None = None,
+    ):
         cfg = self._config.setdefault(session_id, {})
-        if tag is not None:
-            cfg["tag"] = tag
-        if prompt_regex is not None:
-            cfg["prompt_regex"] = prompt_regex
+        if description is not None:
+            cfg["description"] = description
+        if shell_prompt_regex is not None:
+            cfg["shell_prompt_regex"] = shell_prompt_regex
 
         s = self.sessions.get(session_id)
         if s is not None:
-            if tag is not None:
-                s.tag = tag
-            if prompt_regex is not None:
-                s.prompt_regex = prompt_regex
+            if description is not None:
+                s.description = description
+            if shell_prompt_regex is not None:
+                s.shell_prompt_regex = shell_prompt_regex
 
     def configure_full(
         self,
         session_id: str,
         *,
-        tag: str | None = None,
-        prompt_regex: str | None = None,
+        description: str | None = None,
+        shell_prompt_regex: str | None = None,
     ):
         if session_id in self._terminated:
             raise RuntimeError("terminated")
 
         cfg = self._config.setdefault(session_id, {})
-        if tag is not None:
-            cfg["tag"] = tag
-        if prompt_regex is not None:
-            cfg["prompt_regex"] = prompt_regex
+        if description is not None:
+            cfg["description"] = description
+        if shell_prompt_regex is not None:
+            cfg["shell_prompt_regex"] = shell_prompt_regex
 
         s = self.sessions.get(session_id)
         if s is not None:
-            if tag is not None:
-                s.tag = tag
-            if prompt_regex is not None:
-                s.prompt_regex = prompt_regex
+            if description is not None:
+                s.description = description
+            if shell_prompt_regex is not None:
+                s.shell_prompt_regex = shell_prompt_regex
 
     def list_sessions(self) -> list[dict]:
         ids = set(self.sessions.keys()) | set(self._terminated) | set(self._config.keys())
@@ -278,10 +285,10 @@ class SessionManager:
                     "session_id": session_id,
                     "terminated": terminated,
                     "alive": alive,
-                    "tag": (meta or {}).get("tag"),
+                    "description": (meta or {}).get("description"),
                     "cwd": (meta or {}).get("cwd"),
                     "pid": (meta or {}).get("pid"),
-                    "prompt_regex": (meta or {}).get("prompt_regex"),
+                    "shell_prompt_regex": (meta or {}).get("shell_prompt_regex"),
                     "rows": (meta or {}).get("rows"),
                     "cols": (meta or {}).get("cols"),
                     "started_at": (meta or {}).get("started_at"),
@@ -348,7 +355,7 @@ async def determine_terminal_state(
     ctx: Context | None,
     screen: str,
     cursor_x: int | None = None,
-    prompt_regex: str | None = None,
+    shell_prompt_regex: str | None = None,
 ) -> tuple[str, str]:
     """Determine terminal state using sampling when available, else heuristics.
 
@@ -358,7 +365,7 @@ async def determine_terminal_state(
     heuristic_state, heuristic_reason = detect_state_heuristic(
         screen,
         cursor_x=cursor_x,
-        prompt_regex=prompt_regex,
+        shell_prompt_regex=shell_prompt_regex,
     )
     if ctx and getattr(ctx, "session", None):
         # Client sampling is optional in MCP. Some clients provide a session object
@@ -395,7 +402,7 @@ def detect_state_heuristic(
     screen: str,
     *,
     cursor_x: int | None = None,
-    prompt_regex: str | None = None,
+    shell_prompt_regex: str | None = None,
 ) -> tuple[str, str]:
     """Fast heuristic state detection (no LLM).
 
@@ -445,15 +452,15 @@ def detect_state_heuristic(
         return "PAGER", "pager indicators"
 
     # Configurable prompt detection (shell).
-    if prompt_regex:
+    if shell_prompt_regex:
         try:
-            m = re.search(prompt_regex, tail_last)
+            m = re.search(shell_prompt_regex, tail_last)
         except re.error:
             m = None
         if m:
             if cursor_x is not None and cursor_x == 0:
                 return "RUNNING", "cursor at column 0"
-            return "READY", f"prompt_regex matched: {m.group(0)!r}"
+            return "READY", f"shell_prompt_regex matched: {m.group(0)!r}"
 
     # Shell prompts - must look like actual prompts, not progress bars
     # Require typical prompt structure: ends with $ # or > but not inside brackets
@@ -553,14 +560,36 @@ def _missing_session_hint(session_id: str) -> str:
 async def create_session(
     session_id: str,
     cwd: str,
-    tag: str | None = None,
-    prompt_regex: str | None = None,
+    description: Annotated[
+        str | None,
+        Field(
+            description="Free-form description of what this session is doing (for humans). Does not affect execution."
+        ),
+    ] = None,
+    shell_prompt_regex: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional regex used to detect when the terminal is idle at a shell prompt. "
+                "Matched against the last visible non-empty screen line. Prefer anchoring to the end."
+            )
+        ),
+    ] = None,
     ctx: Context | None = None,
 ) -> dict:
     """Create a PTY session with an explicit working directory.
 
     MCP does not provide a standard field for the client's current working
     directory. The caller must provide `cwd` explicitly.
+
+    Args:
+        session_id: Stable identifier for this PTY session.
+        cwd: Working directory for the session's shell.
+        description: Free-form description of what this session is doing (for humans).
+        shell_prompt_regex: Optional regex to detect a shell prompt on the last visible
+            non-empty screen line. Use this only for shell prompt detection, not the LLM prompt.
+            Prefer anchoring to the end of the prompt (e.g. `r\"\\$\\s*$\"`). Set it after
+            observing the actual prompt text if the default heuristics misclassify READY as RUNNING.
     """
     if session_id in getattr(session_manager, "_terminated", set()):
         return {"status": "terminated", "prompt": "none", "created": False, "state_reason": ""}
@@ -574,7 +603,11 @@ async def create_session(
     session = session_manager.sessions.get(session_id)
     if session is None:
         try:
-            session_manager.configure_full(session_id, tag=tag, prompt_regex=prompt_regex)
+            session_manager.configure_full(
+                session_id,
+                description=description,
+                shell_prompt_regex=shell_prompt_regex,
+            )
             session = session_manager.get_session(session_id, cwd=abs_cwd)
         except RuntimeError:
             return {"status": "terminated", "prompt": "none", "created": False, "state_reason": ""}
@@ -587,7 +620,11 @@ async def create_session(
             raise ValueError(
                 f"session_id '{session_id}' already exists with cwd '{existing_cwd}', requested '{abs_cwd}'"
             )
-        session_manager.configure_full(session_id, tag=tag, prompt_regex=prompt_regex)
+        session_manager.configure_full(
+            session_id,
+            description=description,
+            shell_prompt_regex=shell_prompt_regex,
+        )
         created = False
         created_reason = "session already exists"
 
@@ -596,7 +633,7 @@ async def create_session(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     prompt = _prompt_from_state(state, reason)
     status = _status_from_state(terminated=False, alive=session.alive, state=state)
@@ -606,8 +643,8 @@ async def create_session(
         "prompt": prompt,
         "created": created,
         "cwd": meta.get("cwd"),
-        "tag": meta.get("tag"),
-        "prompt_regex": meta.get("prompt_regex"),
+        "description": meta.get("description"),
+        "shell_prompt_regex": meta.get("shell_prompt_regex"),
         "state_reason": f"{created_reason}: {reason}",
     }
 
@@ -672,7 +709,7 @@ async def run(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
 
     prompt = _prompt_from_state(state, reason)
@@ -743,7 +780,7 @@ async def send_input(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
 
     prompt = _prompt_from_state(state, reason)
@@ -827,7 +864,7 @@ async def send_password(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
 
     prompt = _prompt_from_state(state, reason)
@@ -924,7 +961,7 @@ async def send_control(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
 
     prompt = _prompt_from_state(state, reason)
@@ -1005,7 +1042,7 @@ async def poll_output(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
 
     prompt = _prompt_from_state(state, reason)
@@ -1063,7 +1100,7 @@ async def get_screen(session_id: str, ctx: Context | None = None) -> dict:
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     prompt = _prompt_from_state(state, reason)
     status = _status_from_state(terminated=False, alive=session.alive, state=state)
@@ -1111,7 +1148,7 @@ async def get_scrollback(session_id: str, lines: int = 200, ctx: Context | None 
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     prompt = _prompt_from_state(state, reason)
     status = _status_from_state(terminated=False, alive=session.alive, state=state)
@@ -1145,7 +1182,7 @@ async def clear_scrollback(session_id: str, ctx: Context | None = None) -> dict:
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     prompt = _prompt_from_state(state, reason)
     status = _status_from_state(terminated=False, alive=session.alive, state=state)
@@ -1221,7 +1258,7 @@ async def expect(
             ctx,
             snap["screen"],
             cursor_x=snap.get("cursor_x"),
-            prompt_regex=getattr(session, "prompt_regex", None),
+            shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
         )
         prompt = _prompt_from_state(state, reason)
         status = _status_from_state(terminated=False, alive=session.alive, state=state)
@@ -1244,7 +1281,7 @@ async def expect(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     prompt = _prompt_from_state(state, reason)
 
@@ -1282,6 +1319,10 @@ async def expect_prompt(
     the initial `run()` returns. This avoids requiring agents to supply a fragile
     regex like r"[$#] ?$".
 
+    If the remote shell uses a heavily customized prompt that the default
+    heuristics misclassify, set `shell_prompt_regex` via `configure_session(...)`
+    (or pass it to `create_session(...)`) to make READY detection reliable.
+
     Typical usage:
     - create_session(session_id, cwd)
     - run(session_id, "ssh host", timeout=2)
@@ -1306,7 +1347,7 @@ async def expect_prompt(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     if state == "READY":
         return {"status": "ready", "prompt": "shell", "matched": True, "timed_out": False, "state_reason": reason}
@@ -1325,7 +1366,7 @@ async def expect_prompt(
             ctx,
             snap["screen"],
             cursor_x=snap.get("cursor_x"),
-            prompt_regex=getattr(session, "prompt_regex", None),
+            shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
         )
         if state == "READY":
             return {"status": "ready", "prompt": "shell", "matched": True, "timed_out": False, "state_reason": reason}
@@ -1349,8 +1390,8 @@ async def get_metadata(session_id: str, ctx: Context | None = None) -> dict:
             "rows": None,
             "started_at": None,
             "last_activity_at": None,
-            "tag": None,
-            "prompt_regex": None,
+            "description": None,
+            "shell_prompt_regex": None,
             "state_reason": "",
         }
     if session_id not in session_manager.sessions:
@@ -1363,8 +1404,8 @@ async def get_metadata(session_id: str, ctx: Context | None = None) -> dict:
             "rows": None,
             "started_at": None,
             "last_activity_at": None,
-            "tag": None,
-            "prompt_regex": None,
+            "description": None,
+            "shell_prompt_regex": None,
             "state_reason": _missing_session_hint(session_id),
         }
     session = session_manager.sessions[session_id]
@@ -1374,12 +1415,24 @@ async def get_metadata(session_id: str, ctx: Context | None = None) -> dict:
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     prompt = _prompt_from_state(state, reason)
     status = _status_from_state(terminated=False, alive=session.alive, state=state)
     meta = await asyncio.to_thread(session.metadata)
-    out = {k: meta.get(k) for k in ["cwd", "pid", "cols", "rows", "started_at", "last_activity_at", "tag", "prompt_regex"]}
+    out = {
+        k: meta.get(k)
+        for k in [
+            "cwd",
+            "pid",
+            "cols",
+            "rows",
+            "started_at",
+            "last_activity_at",
+            "description",
+            "shell_prompt_regex",
+        ]
+    }
     out.update({"state_reason": reason})
     return {"status": status, "prompt": prompt, **out}
 
@@ -1392,18 +1445,42 @@ def list_sessions() -> dict:
 @mcp.tool()
 async def configure_session(
     session_id: str,
-    tag: str | None = None,
-    prompt_regex: str | None = None,
+    description: Annotated[
+        str | None,
+        Field(
+            description="Free-form description of what this session is doing (for humans). Does not affect execution."
+        ),
+    ] = None,
+    shell_prompt_regex: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional regex used to detect when the terminal is idle at a shell prompt. "
+                "Matched against the last visible non-empty screen line. Prefer anchoring to the end."
+            )
+        ),
+    ] = None,
     ctx: Context | None = None,
 ) -> dict:
+    """Update session metadata and shell prompt detection.
+
+    `description` is free-form metadata for humans and does not affect execution.
+
+    `shell_prompt_regex` is used by heuristic readiness detection to decide
+    whether the terminal is idle at a shell prompt. It is matched against the
+    last non-empty line of the rendered screen.
+
+    This can be called before a session exists; values are stored by `session_id`
+    and applied when the session is created.
+    """
     if session_id in getattr(session_manager, "_terminated", set()):
         return {"status": "terminated", "prompt": "none", "state_reason": ""}
 
     try:
         session_manager.configure_full(
             session_id,
-            tag=tag,
-            prompt_regex=prompt_regex,
+            description=description,
+            shell_prompt_regex=shell_prompt_regex,
         )
     except RuntimeError as e:
         if str(e) == "terminated":
@@ -1417,8 +1494,8 @@ async def configure_session(
             "status": "running",
             "prompt": "unknown",
             "session_exists": False,
-            "tag": cfg.get("tag"),
-            "prompt_regex": cfg.get("prompt_regex"),
+            "description": cfg.get("description"),
+            "shell_prompt_regex": cfg.get("shell_prompt_regex"),
             "state_reason": "configured (session not yet created; call create_session(session_id, cwd))",
         }
 
@@ -1427,7 +1504,7 @@ async def configure_session(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     prompt = _prompt_from_state(state, reason)
     status = _status_from_state(terminated=False, alive=session.alive, state=state)
@@ -1435,8 +1512,8 @@ async def configure_session(
         "status": status,
         "prompt": prompt,
         "session_exists": True,
-        "tag": getattr(session, "tag", None),
-        "prompt_regex": getattr(session, "prompt_regex", None),
+        "description": getattr(session, "description", None),
+        "shell_prompt_regex": getattr(session, "shell_prompt_regex", None),
         "state_reason": reason,
     }
 
@@ -1504,7 +1581,7 @@ async def send_signal(
         ctx,
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     prompt = _prompt_from_state(state, reason)
     status = _status_from_state(terminated=False, alive=session.alive, state=state)
@@ -1540,7 +1617,7 @@ def transcript(session_id: str) -> dict:
     state, reason = detect_state_heuristic(
         snap["screen"],
         cursor_x=snap.get("cursor_x"),
-        prompt_regex=getattr(session, "prompt_regex", None),
+        shell_prompt_regex=getattr(session, "shell_prompt_regex", None),
     )
     prompt = _prompt_from_state(state, reason)
     status = _status_from_state(terminated=False, alive=session.alive, state=state)
