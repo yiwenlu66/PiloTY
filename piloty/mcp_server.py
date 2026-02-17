@@ -1118,10 +1118,18 @@ async def get_screen(session_id: str, ctx: Context | None = None) -> dict:
 
 
 @mcp.tool()
-async def get_scrollback(session_id: str, lines: int = 200, ctx: Context | None = None) -> dict:
+async def get_scrollback(
+    session_id: str,
+    lines: int = 200,
+    strip_ansi: bool = False,
+    ctx: Context | None = None,
+) -> dict:
     """Get rendered terminal scrollback.
 
     Requires an existing session created via `create_session(session_id, cwd)`.
+
+    If `strip_ansi` is True, strips ANSI escape sequences and common control
+    characters from the returned scrollback.
     """
     if session_id in getattr(session_manager, "_terminated", set()):
         return {
@@ -1154,6 +1162,7 @@ async def get_scrollback(session_id: str, lines: int = 200, ctx: Context | None 
     status = _status_from_state(terminated=False, alive=session.alive, state=state)
     # Do not drain the PTY here. Output ingestion happens via run/send_*/poll_output/expect.
     sb = await asyncio.to_thread(session.get_scrollback, lines, drain=False)
+    sb = _maybe_strip_ansi(sb, strip_ansi=strip_ansi)
     return {
         "status": status,
         "prompt": prompt,
