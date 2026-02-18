@@ -28,7 +28,7 @@ from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
 from mcp.types import SamplingMessage, TextContent
 from pydantic import ConfigDict, Field
 
-from .core import PTY
+from .core import PTY, default_session_log_dir
 
 logger = logging.getLogger(__name__)
 
@@ -530,23 +530,12 @@ def detect_state_heuristic(
 
 
 def _session_log_dir_exists(session_id: str) -> bool:
-    base = os.path.join(str(Path.home()), ".piloty", "sessions")
-    if os.path.isdir(os.path.join(base, session_id)):
-        return True
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id).strip("._-") or "default"
-    return os.path.isdir(os.path.join(base, safe))
+    return os.path.isdir(str(default_session_log_dir(session_id)))
 
 
 def _session_transcript_path_if_exists(session_id: str) -> str | None:
-    base = os.path.join(str(Path.home()), ".piloty", "sessions")
-    direct = os.path.join(base, session_id, "transcript.log")
-    if os.path.isfile(direct):
-        return direct
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id).strip("._-") or "default"
-    safe_path = os.path.join(base, safe, "transcript.log")
-    if os.path.isfile(safe_path):
-        return safe_path
-    return None
+    tp = str(default_session_log_dir(session_id) / "transcript.log")
+    return tp if os.path.isfile(tp) else None
 
 
 def _missing_session_hint(session_id: str) -> str:

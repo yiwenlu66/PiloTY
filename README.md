@@ -87,13 +87,13 @@ For exact tool names, arguments, and return fields, use your MCP client's tool s
 
 ## Logs
 
-Each session writes logs under `~/.piloty/`:
+Each server instance writes session logs under `~/.piloty/`:
 
-- `~/.piloty/sessions/<session-id>/transcript.log`: raw PTY bytes (combined stdout/stderr)
-- `~/.piloty/sessions/<session-id>/commands.log`: inputs sent (best-effort)
-- `~/.piloty/sessions/<session-id>/interaction.log`: inputs plus captured output (best-effort)
-- `~/.piloty/sessions/<session-id>/session.json`: metadata snapshot
-- `~/.piloty/active/<session-id>`: symlink to the current session directory (when symlinks are supported)
+- `~/.piloty/servers/<server-instance-id>/sessions/<session-id>/transcript.log`: raw PTY bytes (combined stdout/stderr)
+- `~/.piloty/servers/<server-instance-id>/sessions/<session-id>/commands.log`: inputs sent (best-effort)
+- `~/.piloty/servers/<server-instance-id>/sessions/<session-id>/interaction.log`: inputs plus captured output (best-effort)
+- `~/.piloty/servers/<server-instance-id>/sessions/<session-id>/session.json`: metadata snapshot
+- `~/.piloty/active/<server-instance-id>/<session-id>`: symlink to the current session directory (when symlinks are supported)
 
 Server logs default to `/tmp/piloty.log`.
 
@@ -101,8 +101,8 @@ Server logs default to `/tmp/piloty.log`.
 
 ```bash
 python tools/session_viewer.py list
-python tools/session_viewer.py info <session-id>
-python tools/session_viewer.py tail -f <session-id>
+python tools/session_viewer.py info <server-instance-id>/<session-id>
+python tools/session_viewer.py tail -f <server-instance-id>/<session-id>
 ```
 
 ## Development

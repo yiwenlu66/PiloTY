@@ -3,7 +3,7 @@
 Session Viewer - Inspect PiloTY session logs and state.
 
 This tool allows you to view and monitor PTY sessions that have been
-logged to ~/.piloty/
+logged under ~/.piloty/
 """
 import sys
 import json
@@ -18,43 +18,115 @@ def get_piloty_dir():
     return Path.home() / ".piloty"
 
 
+def _active_sessions():
+    piloty_dir = get_piloty_dir()
+    active_dir = piloty_dir / "active"
+    if not active_dir.exists():
+        return []
+
+    out = []
+    for server_dir in sorted(active_dir.iterdir()):
+        if not server_dir.is_dir():
+            continue
+        for link in sorted(server_dir.iterdir()):
+            if not link.is_symlink():
+                continue
+            out.append((server_dir.name, link.name, link, link.resolve()))
+    return out
+
+
+def _all_sessions():
+    piloty_dir = get_piloty_dir()
+    servers_dir = piloty_dir / "servers"
+    if not servers_dir.exists():
+        return []
+
+    out = []
+    for server_dir in sorted(servers_dir.iterdir()):
+        sessions_dir = server_dir / "sessions"
+        if not sessions_dir.exists():
+            continue
+        for session_dir in sorted(sessions_dir.iterdir()):
+            if not session_dir.is_dir():
+                continue
+            out.append((server_dir.name, session_dir.name, session_dir))
+    return out
+
+
+def _resolve_session_ref(session_ref: str) -> tuple[str, Path] | None:
+    piloty_dir = get_piloty_dir()
+
+    if "/" in session_ref:
+        server_id, session_id = session_ref.split("/", 1)
+        active_link = piloty_dir / "active" / server_id / session_id
+        if active_link.exists() and active_link.is_symlink():
+            return (f"{server_id}/{session_id}", active_link.resolve())
+
+        session_dir = piloty_dir / "servers" / server_id / "sessions" / session_id
+        if session_dir.exists() and session_dir.is_dir():
+            return (f"{server_id}/{session_id}", session_dir)
+
+        print(f"Session '{server_id}/{session_id}' not found.")
+        return None
+
+    active_matches = [
+        (server_id, sid, path)
+        for (server_id, sid, _link, path) in _active_sessions()
+        if sid == session_ref
+    ]
+    if len(active_matches) == 1:
+        server_id, sid, path = active_matches[0]
+        return (f"{server_id}/{sid}", path)
+    if len(active_matches) > 1:
+        matches = ", ".join(f"{server_id}/{sid}" for (server_id, sid, _p) in active_matches)
+        print(f"Ambiguous session id '{session_ref}'. Matches: {matches}")
+        return None
+
+    all_matches = [
+        (server_id, sid, path) for (server_id, sid, path) in _all_sessions() if sid == session_ref
+    ]
+    if len(all_matches) == 1:
+        server_id, sid, path = all_matches[0]
+        return (f"{server_id}/{sid}", path)
+    if len(all_matches) > 1:
+        matches = ", ".join(f"{server_id}/{sid}" for (server_id, sid, _p) in all_matches)
+        print(f"Ambiguous session id '{session_ref}'. Matches: {matches}")
+        return None
+
+    print(f"Session '{session_ref}' not found.")
+    return None
+
+
 def list_sessions(show_all=False):
     """List active or all sessions."""
-    piloty_dir = get_piloty_dir()
-    
     if show_all:
-        sessions_dir = piloty_dir / "sessions"
-        if not sessions_dir.exists():
+        sessions = _all_sessions()
+        if not sessions:
             print("No sessions found.")
             return
-            
-        sessions = list(sessions_dir.iterdir())
         print(f"\nAll sessions ({len(sessions)} total):")
     else:
-        active_dir = piloty_dir / "active"
-        if not active_dir.exists():
+        sessions = _active_sessions()
+        if not sessions:
             print("No active sessions found.")
             return
-            
-        sessions = list(active_dir.iterdir())
         print(f"\nActive sessions ({len(sessions)} total):")
-    
-    if not sessions:
-        print("  (none)")
-        return
-        
-    # Sort by name
-    sessions.sort()
-    
-    for session_path in sessions:
-        # For active sessions, resolve symlink to get actual path
-        if session_path.is_symlink():
-            actual_path = session_path.resolve()
-        else:
-            actual_path = session_path
-            
+
+    if show_all:
+        for server_id, session_id, actual_path in sessions:
+            display = f"{server_id}/{session_id}"
+            session_path = actual_path
+            _print_session_summary(display, session_path, show_all=True)
+    else:
+        for server_id, session_id, _link, actual_path in sessions:
+            display = f"{server_id}/{session_id}"
+            session_path = actual_path
+            _print_session_summary(display, session_path, show_all=False)
+
+
+def _print_session_summary(display: str, session_path: Path, show_all: bool):
         # Read session metadata
-        session_file = actual_path / "session.json"
+        session_file = session_path / "session.json"
         if session_file.exists():
             with open(session_file) as f:
                 metadata = json.load(f)
@@ -72,27 +144,21 @@ def list_sessions(show_all=False):
             else:
                 status = "ended" if metadata.get('end_time') else "unknown"
                 
-            print(f"  {session_path.name} - Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - PID: {pid} - Status: {status}")
+            print(
+                f"  {display} - Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - PID: {pid} - Status: {status}"
+            )
         else:
-            print(f"  {session_path.name} - (no metadata)")
+            print(f"  {display} - (no metadata)")
 
 
 def show_session_info(session_id):
     """Show detailed information about a session."""
-    piloty_dir = get_piloty_dir()
-    
-    # Try active first, then all sessions
-    session_path = piloty_dir / "active" / session_id
-    if session_path.exists() and session_path.is_symlink():
-        session_path = session_path.resolve()
-    else:
-        session_path = piloty_dir / "sessions" / session_id
-        
-    if not session_path.exists():
-        print(f"Session '{session_id}' not found.")
+    resolved = _resolve_session_ref(session_id)
+    if resolved is None:
         return
-        
-    print(f"\nSession: {session_id}")
+    display, session_path = resolved
+
+    print(f"\nSession: {display}")
     print("=" * 50)
     
     # Show metadata
@@ -130,19 +196,11 @@ def show_session_info(session_id):
 
 def show_commands(session_id, last_n=None):
     """Show commands from a session."""
-    piloty_dir = get_piloty_dir()
-    
-    # Find session
-    session_path = piloty_dir / "active" / session_id
-    if session_path.exists() and session_path.is_symlink():
-        session_path = session_path.resolve()
-    else:
-        session_path = piloty_dir / "sessions" / session_id
-        
-    if not session_path.exists():
-        print(f"Session '{session_id}' not found.")
+    resolved = _resolve_session_ref(session_id)
+    if resolved is None:
         return
-        
+    display, session_path = resolved
+
     commands_file = session_path / "commands.log"
     if not commands_file.exists():
         print("No commands log found.")
@@ -154,7 +212,7 @@ def show_commands(session_id, last_n=None):
     if last_n:
         lines = lines[-last_n:]
         
-    print(f"\nCommands from session {session_id}:")
+    print(f"\nCommands from session {display}:")
     print("-" * 50)
     for line in lines:
         print(line.rstrip())
@@ -162,19 +220,11 @@ def show_commands(session_id, last_n=None):
 
 def show_interactions(session_id, last_n=None):
     """Show formatted interactions from a session."""
-    piloty_dir = get_piloty_dir()
-    
-    # Find session
-    session_path = piloty_dir / "active" / session_id
-    if session_path.exists() and session_path.is_symlink():
-        session_path = session_path.resolve()
-    else:
-        session_path = piloty_dir / "sessions" / session_id
-        
-    if not session_path.exists():
-        print(f"Session '{session_id}' not found.")
+    resolved = _resolve_session_ref(session_id)
+    if resolved is None:
         return
-        
+    display, session_path = resolved
+
     interaction_file = session_path / "interaction.log"
     if not interaction_file.exists():
         print("No interaction log found.")
@@ -190,26 +240,18 @@ def show_interactions(session_id, last_n=None):
             sections = sections[-last_n:]
             content = '\n[' + '\n['.join(sections)
         
-    print(f"\nInteractions from session {session_id}:")
+    print(f"\nInteractions from session {display}:")
     print("-" * 50)
     print(content)
 
 
 def tail_transcript(session_id, follow=False):
     """Tail the transcript log."""
-    piloty_dir = get_piloty_dir()
-    
-    # Find session
-    session_path = piloty_dir / "active" / session_id
-    if session_path.exists() and session_path.is_symlink():
-        session_path = session_path.resolve()
-    else:
-        session_path = piloty_dir / "sessions" / session_id
-        
-    if not session_path.exists():
-        print(f"Session '{session_id}' not found.")
+    resolved = _resolve_session_ref(session_id)
+    if resolved is None:
         return
-        
+    _display, session_path = resolved
+
     transcript_file = session_path / "transcript.log"
     if not transcript_file.exists():
         print("No transcript log found.")
@@ -240,8 +282,12 @@ def cleanup_stale_sessions():
         return
         
     removed = 0
-    for symlink in active_dir.iterdir():
-        if symlink.is_symlink():
+    for server_dir in active_dir.iterdir():
+        if not server_dir.is_dir():
+            continue
+        for symlink in server_dir.iterdir():
+            if not symlink.is_symlink():
+                continue
             target = symlink.resolve()
             
             # Check if session metadata exists
@@ -257,12 +303,12 @@ def cleanup_stale_sessions():
                     os.kill(pid, 0)
                 except ProcessLookupError:
                     # Process is dead, remove symlink
-                    print(f"Removing stale session: {symlink.name} (PID {pid} not found)")
+                    print(f"Removing stale session: {server_dir.name}/{symlink.name} (PID {pid} not found)")
                     symlink.unlink()
                     removed += 1
             else:
                 # No metadata, remove symlink
-                print(f"Removing invalid session: {symlink.name} (no metadata)")
+                print(f"Removing invalid session: {server_dir.name}/{symlink.name} (no metadata)")
                 symlink.unlink()
                 removed += 1
                 

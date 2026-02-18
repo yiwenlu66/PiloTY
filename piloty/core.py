@@ -24,6 +24,38 @@ import pexpect
 import pyte
 
 
+def _safe_id(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", value).strip("._-")
+    return safe or "default"
+
+
+_PILOTY_DIR = Path.home() / ".piloty"
+
+_SERVER_INSTANCE_ID = _safe_id(
+    os.getenv("PILOTY_SERVER_INSTANCE_ID")
+    or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}_{os.getpid()}"
+)
+
+_LOG_ROOT_OVERRIDE = os.getenv("PILOTY_LOG_ROOT")
+_SERVER_LOG_ROOT = (
+    Path(_LOG_ROOT_OVERRIDE).expanduser().absolute()
+    if _LOG_ROOT_OVERRIDE
+    else (_PILOTY_DIR / "servers" / _SERVER_INSTANCE_ID)
+)
+
+
+def server_instance_id() -> str:
+    return _SERVER_INSTANCE_ID
+
+
+def server_log_root() -> Path:
+    return _SERVER_LOG_ROOT
+
+
+def default_session_log_dir(session_id: str) -> Path:
+    return _SERVER_LOG_ROOT / "sessions" / _safe_id(session_id)
+
+
 class _PyteListenerProxy:
     """Adapter to tolerate pyte sending keyword args (e.g., private=True).
 
@@ -134,12 +166,9 @@ class PTY:
         self._last_activity_at = self._started_at
 
         if log_dir is None:
-            base = Path.home() / ".piloty" / "sessions"
-            safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id).strip("._-")
-            if not safe:
-                safe = "default"
-            log_dir = str(base / safe)
-        self._safe_id = Path(log_dir).name
+            log_dir = str(default_session_log_dir(session_id))
+        self._safe_id = _safe_id(session_id)
+        self._server_instance_id = _SERVER_INSTANCE_ID
         self._session_dir = Path(log_dir)
         os.makedirs(log_dir, exist_ok=True)
         self._transcript_path = os.path.join(log_dir, "transcript.log")
@@ -762,7 +791,7 @@ class PTY:
             pass
 
     def _ensure_active_symlink(self):
-        active_dir = Path.home() / ".piloty" / "active"
+        active_dir = Path.home() / ".piloty" / "active" / self._server_instance_id
         try:
             active_dir.mkdir(parents=True, exist_ok=True)
             link = active_dir / self._safe_id
@@ -773,7 +802,7 @@ class PTY:
             pass
 
     def _remove_active_symlink(self):
-        active_dir = Path.home() / ".piloty" / "active"
+        active_dir = Path.home() / ".piloty" / "active" / self._server_instance_id
         link = active_dir / self._safe_id
         try:
             if link.is_symlink() or link.exists():
